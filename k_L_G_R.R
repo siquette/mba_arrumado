@@ -13,7 +13,7 @@ library(spatstat.core)
 library(spatstat.geom)
 
 # Leitura e transformação dos dados espaciais de roubos
-roubos_sf <- read_sf("/home/ras/Documentos/mba/mba_dados-main/df_roubos_projetado.shp") %>% 
+roubos_sf <- read_sf("C:\Users\Vivian - H2R\Downloads\mba\git\mba_arrumado\shp\df_roubos_6meses.shp") %>% 
   st_transform(crs = 32723)
 
 # Conversão do objeto sf para owin e ppp

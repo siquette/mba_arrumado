@@ -1,17 +1,19 @@
+
+#%%
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
-
+#%%
 # Carregar os dados CSV
 df_roubos_raw = pd.read_csv(
-    "C:/Users/Vivian - H2R/Downloads/mba/scrip/dados_tratados/df_roubos_24_recort.csv",
+    r"C:\Users\Vivian - H2R\Downloads\mba\git\mba_arrumado\dados_tratados\dados_tratados\df_drogas_24_recort.csv",
     dtype={0: str}
 )
 
 # Filtrar os dados pelo mês desejado
-meses = [1,2,3,4,5,6]
-df_roubos = df_roubos_raw[df_roubos_raw['MES'].isin(meses)]
+meses = [1,2,3,4,5,6,7,8,9,10,11,12]
+df_roubos = df_roubos_raw[df_roubos_raw['MES_ESTATI'].isin(meses)]
 
 # Selecionar apenas as colunas necessárias
 df_roubos = df_roubos[['LATITUDE', 'LONGITUDE']]
@@ -36,7 +38,7 @@ utm_crs = "EPSG:31983"
 df_roubos = df_roubos.to_crs(utm_crs)
 
 # Salvar como shapefile
-output_path = "C:/Users/Vivian - H2R/Downloads/mba/scrip/dados_tratados/df_roubos_6meses.shp"
+output_path = "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/h3df_drogas_h3.shp"
 df_roubos.to_file(output_path, driver="ESRI Shapefile")
 
 print(f"Arquivo shapefile salvo em: {output_path}")
