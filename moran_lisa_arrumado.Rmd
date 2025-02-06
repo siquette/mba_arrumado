@@ -1,0 +1,234 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+# Função para verificar e instalar pacotes
+install_if_missing <- function(packages) {
+  new_packages <- packages[!packages %in% installed.packages()[, "Package"]]
+  if (length(new_packages) > 0) {
+    install.packages(new_packages)
+  }
+}
+
+# Pacotes necessários
+necessary_packages <- c("sf", "spdep", "tidyverse", "ncf", "tmap", "textshaping", "ragg")
+install_if_missing(necessary_packages)
+
+```
+
+```{r}
+# Carregar as bibliotecas necessárias
+suppressPackageStartupMessages({
+  library(sf)
+  library(spdep)
+  library(tidyverse)
+  library(ncf)
+  library(tmap)
+})
+```
+
+```{r}
+# Caminho do arquivo shapefile
+shapefile_path <- "/home/ras/Documentos/mba/git/mba_arrumado/h3/h3_drogas_agregado/content/h3_roubo_agregado.shp"
+
+# Leitura e projeção dos dados
+h3_roubo_moran <- st_read(shapefile_path) %>%
+  st_transform(crs = 31983)
+
+# Verificar e preparar os dados espaciais
+h3_roubo_moran_sp <- as(h3_roubo_moran, "Spatial")
+vizinhanca_h3 <- poly2nb(h3_roubo_moran_sp)
+pesos_h3 <- nb2listw(vizinhanca_h3, style = "W")
+```
+
+```{r}
+
+# Verificar estrutura do Spatial Data Frame
+h3_roubo_moran_sp <- as(h3_roubo_moran, "Spatial")
+
+# Criar vizinhança espacial baseada em polígonos adjacentes
+h3_roubo_moran_vizinhanca <- poly2nb(h3_roubo_moran_sp)
+
+# Criar matriz de pesos espaciais para análise
+h3_roubo_pesos <- nb2listw(h3_roubo_moran_vizinhanca, style = "W")
+
+
+
+```
+
+
+```{r}
+# Calcular o Índice Global de Moran
+resultado_moran <- moran.test(h3_roubo_moran_sp$contagem, h3_roubo_pesos)
+print(resultado_moran)
+
+```
+
+```{r}
+# Calcular e imprimir o Índice Global de Moran
+resultado_moran <- moran.test(h3_roubo_moran_sp$contagem, pesos_h3)
+print(resultado_moran)
+
+# Criar correlograma de contiguidade espacial
+correlograma_contig <- sp.correlogram(vizinhanca_h3, h3_roubo_moran_sp$contagem, order = 5, method = "I", style = "W")
+plot(correlograma_contig)
+```
+```{r}
+correlograma_contig 
+```
+
+```{r}
+# Verifique as coordenadas após projeção
+coords <- coordinates(as(h3_roubo_moran, "Spatial"))
+
+# Reduza o incremento e reamostre
+correlograma_distancia <- correlog(
+  x = coords[, 1],
+  y = coords[, 2],
+  z = h3_roubo_moran$contagem,
+  increment = 500,   # Distância (em metros)
+  resamp = 200        # Maior reamostragem para maior robustez
+)
+
+# Plot do correlograma
+plot(correlograma_distancia)
+```
+
+
+```{r}
+
+# Preparação dos dados espaciais
+vizinhanca_h3 <- poly2nb(as(h3_roubo_moran, "Spatial"))
+pesos_h3 <- nb2listw(vizinhanca_h3, style = "W")
+
+# Calcular Índice Local de Moran (LISA) e adicionar aos dados
+lisa <- localmoran(h3_roubo_moran$contagem, pesos_h3)
+h3_roubo_moran$lisa_stat <- lisa[, "Ii"]
+h3_roubo_moran$p_value <- lisa[, "Pr(z != E(Ii))"]
+
+# Criar o mapa LISA com fundo do OpenStreetMap
+tmap_mode("plot")
+lisa_map <- tm_shape(h3_roubo_moran) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_fill("lisa_stat", palette = c("blue", "white", "red"), midpoint = 0) +
+  tm_borders() +
+  tm_graticules(lines = FALSE, labels.size = 0.7, labels.inside.frame = TRUE) +  # Marcações de projeção
+  tm_layout(
+    title = "",
+    legend.outside = TRUE,
+    main.title.outside = TRUE
+  )
+
+
+lisa_map
+```
+```{r}
+
+# Calcular o Índice Local de Moran (LISA) e adicionar os p-valores aos dados
+lisa <- localmoran(h3_roubo_moran$contagem, pesos_h3)
+h3_roubo_moran$moran_p <- lisa[, "Pr(z != E(Ii))"]
+
+# Criar o mapa dos p-valores do LISA com fundo do OpenStreetMap
+tmap_mode("plot")
+moran_map <- tm_shape(h3_roubo_moran) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_fill(col = "moran_p", style = "fixed", 
+          breaks = c(0, 0.01, 0.05, 1), 
+          palette = c("darkblue", "blue", "gray")) +
+  tm_borders() +
+  tm_graticules(lines = FALSE, labels.size = 0.7, labels.inside.frame = TRUE) +  # Marcações de projeção
+  tm_layout(
+    title = "",
+    legend.outside = TRUE,
+    main.title.outside = TRUE
+  )
+
+moran_map
+```
+
+```{r}
+# Criar um plot de dispersão de Moran
+wm <- as.vector(lag.listw(pesos_h3, h3_roubo_moran$contagem)) # médias ponderadas
+moran_df <- data.frame(contagem = h3_roubo_moran$contagem, wm = wm)
+
+moran_plot <- ggplot(moran_df, aes(x = contagem, y = wm)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  geom_hline(yintercept = mean(wm), linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = mean(h3_roubo_moran$contagem), linetype = "dashed", color = "blue") +
+  theme_minimal() +
+  labs(x = "Contagem Local",
+       y = "Contagem Média Ponderada dos Vizinhos",
+       title = "Diagrama de Espalhamento de Moran")
+
+print(moran_plot)
+```
+```{r}
+# Obter um resumo estatístico do Índice Local de Moran
+summary(h3_roubo_moran$moran)
+```
+
+```{r}
+
+
+# Anexar os resultados LISA aos dados espaciais
+h3_roubo_moran$moran <- lisa[, "Ii"]
+
+# Criar o mapa do Índice Local de Moran com fundo do OpenStreetMap
+tmap_mode("plot")
+moran_map <- tm_shape(h3_roubo_moran) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_fill("moran", style = "fixed", 
+          breaks = c(-3, 0, 0.2, 0.5, 30), 
+          palette = c("red", "lightblue", "blue", "blue4")) +
+  tm_borders() +
+  tm_graticules(lines = FALSE, labels.size = 0.7, labels.inside.frame = TRUE) +  # Adiciona marcações de projeção nas arestas
+  tm_layout(
+    title = "",
+    legend.outside = TRUE,
+    main.title.outside = TRUE
+  )
+
+# Imprimir o mapa
+moran_map
+```
+```{r}
+# Calcular o Índice Local de Moran e o lag espacial
+lisa <- localmoran(h3_roubo_moran$contagem, pesos_h3)
+h3_roubo_moran$lag_contagem <- lag.listw(pesos_h3, h3_roubo_moran$contagem)
+
+# Fatores de classificação LISA com base no valor e seu lag
+mean_contagem <- mean(h3_roubo_moran$contagem)
+mean_lag_contagem <- mean(h3_roubo_moran$lag_contagem)
+
+L1 <- factor(h3_roubo_moran$contagem >= mean_contagem, labels = c("L", "H"))
+L2 <- factor(h3_roubo_moran$lag_contagem >= mean_lag_contagem, labels = c("L", "H"))
+h3_roubo_moran$lisa <- factor(paste(L1, L2), levels = c("H H", "H L", "L H", "L L"))
+
+
+# Criação do Mapa LISA com Cores Definidas para Categorias e OpenStreetMap
+tmap_mode("plot")
+lisa_map <- tm_shape(h3_roubo_moran) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_fill("lisa", palette = c("L L" = "red", "H H" = "blue", "H L" = "green", "L H" = "yellow"), na.value = "gray") +
+  tm_borders() +
+  tm_graticules(lines = FALSE, labels.size = 0.7, labels.inside.frame = TRUE) +  # Marcações de projeção
+  tm_layout(
+    title = "",
+    legend.outside = TRUE,
+    main.title.outside = TRUE
+  )
+
+# Imprimir o mapa
+print(lisa_map)  
+```
+
+
+
+
+
+
