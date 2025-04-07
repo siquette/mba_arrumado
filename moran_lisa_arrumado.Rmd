@@ -18,6 +18,7 @@ install_if_missing <- function(packages) {
 necessary_packages <- c("sf", "spdep", "tidyverse", "ncf", "tmap", "textshaping", "ragg")
 install_if_missing(necessary_packages)
 
+
 ```
 
 ```{r}
@@ -33,7 +34,7 @@ suppressPackageStartupMessages({
 
 ```{r}
 # Caminho do arquivo shapefile
-shapefile_path <- "/home/ras/Documentos/mba/git/mba_arrumado/h3/h3_drogas_agregado/content/h3_roubo_agregado.shp"
+shapefile_path <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
 
 # Leitura e projeção dos dados
 h3_roubo_moran <- st_read(shapefile_path) %>%
@@ -65,6 +66,8 @@ h3_roubo_pesos <- nb2listw(h3_roubo_moran_vizinhanca, style = "W")
 # Calcular o Índice Global de Moran
 resultado_moran <- moran.test(h3_roubo_moran_sp$contagem, h3_roubo_pesos)
 print(resultado_moran)
+moran_I <- resultado_moran$estimate["Moran I statistic"]
+
 
 ```
 
@@ -83,23 +86,24 @@ correlograma_contig
 
 ```{r}
 # Verifique as coordenadas após projeção
-coords <- coordinates(as(h3_roubo_moran, "Spatial"))
+#coords <- coordinates(as(h3_roubo_moran, "Spatial"))
 
 # Reduza o incremento e reamostre
-correlograma_distancia <- correlog(
-  x = coords[, 1],
-  y = coords[, 2],
-  z = h3_roubo_moran$contagem,
-  increment = 500,   # Distância (em metros)
-  resamp = 200        # Maior reamostragem para maior robustez
-)
+#correlograma_distancia <- correlog(
+#  x = coords[, 1],
+#  y = coords[, 2],
+#  z = h3_roubo_moran$contagem,
+#  increment = 500,   # Distância (em metros)
+#  resamp = 200        # Maior reamostragem para maior robustez
+#)
 
 # Plot do correlograma
-plot(correlograma_distancia)
+#plot(correlograma_distancia)
 ```
 
 
 ```{r}
+
 
 # Preparação dos dados espaciais
 vizinhanca_h3 <- poly2nb(as(h3_roubo_moran, "Spatial"))
@@ -128,6 +132,7 @@ lisa_map
 ```
 ```{r}
 
+
 # Calcular o Índice Local de Moran (LISA) e adicionar os p-valores aos dados
 lisa <- localmoran(h3_roubo_moran$contagem, pesos_h3)
 h3_roubo_moran$moran_p <- lisa[, "Pr(z != E(Ii))"]
@@ -149,7 +154,6 @@ moran_map <- tm_shape(h3_roubo_moran) +
 
 moran_map
 ```
-
 ```{r}
 # Criar um plot de dispersão de Moran
 wm <- as.vector(lag.listw(pesos_h3, h3_roubo_moran$contagem)) # médias ponderadas
@@ -167,13 +171,36 @@ moran_plot <- ggplot(moran_df, aes(x = contagem, y = wm)) +
 
 print(moran_plot)
 ```
+
+```{r}
+
+# Calcular o Índice Local de Moran (LISA) e adicionar os p-valores aos dados
+lisa <- localmoran(h3_roubo_moran$contagem, pesos_h3)
+h3_roubo_moran$moran_p <- lisa[, "Pr(z != E(Ii))"]
+
+# Criar o mapa dos p-valores do LISA com fundo do OpenStreetMap
+tmap_mode("plot")
+moran_map <- tm_shape(h3_roubo_moran) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_fill(col = "moran_p", style = "fixed", 
+          breaks = c(0, 0.01, 0.05, 1), 
+          palette = c("darkblue", "blue", "gray")) +
+  tm_borders() +
+  tm_graticules(lines = FALSE, labels.size = 0.7, labels.inside.frame = TRUE) +  # Marcações de projeção
+  tm_layout(
+    title = "",
+    legend.outside = TRUE,
+    main.title.outside = TRUE
+  )
+
+moran_map
+```
 ```{r}
 # Obter um resumo estatístico do Índice Local de Moran
 summary(h3_roubo_moran$moran)
 ```
 
 ```{r}
-
 
 # Anexar os resultados LISA aos dados espaciais
 h3_roubo_moran$moran <- lisa[, "Ii"]
@@ -228,6 +255,10 @@ print(lisa_map)
 ```
 
 
+```{r}
+# Salvar o shapefile com os resultados
+  st_write(h3_roubo_moran, "h3_roubo_moran_lisa.shp", delete_layer = TRUE)
+```
 
 
 

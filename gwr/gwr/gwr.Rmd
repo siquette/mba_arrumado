@@ -1,0 +1,466 @@
+---
+title: "R Notebook com GWR"
+output:
+  html_document:
+    df_print: paged
+---
+
+Este notebook R realiza uma análise de regressão ponderada geograficamente (GWR) para modelar a relação entre roubos e uma variável preditora de um arquivo shapefile. A GWR é uma técnica estatística que permite modelar relações espaciais não estacionárias, ou seja, relações que variam geograficamente. Ao contrário da regressão linear global, que assume que a relação entre as variáveis é constante em toda a área de estudo, a GWR permite que os coeficientes de regressão variem espacialmente, capturando a heterogeneidade espacial.
+
+Função para verificar e instalar pacotes
+```{r}
+install_if_missing <- function(packages) {
+  new_packages <- packages[!packages %in% installed.packages()[, "Package"]]
+  if (length(new_packages) > 0) {
+    install.packages(new_packages)
+  }
+}
+```
+
+```{r}
+necessary_packages <- c("sf", "spdep", "tidyverse", "ncf", "tmap", "GWmodel", "dplyr")
+install_if_missing(necessary_packages)
+
+
+suppressPackageStartupMessages({
+  library(sf)
+  library(spdep)
+  library(tidyverse)
+  library(ncf)
+  library(tmap)
+  library(GWmodel)
+  library(dplyr)
+})
+```
+```{r}
+shapefile_path_roubo <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp" 
+```
+
+```{r}
+h3_roubo <- st_read(shapefile_path_roubo) %>%
+  st_transform(crs = 31983)
+
+h3_drogas <- st_read(shapefile_path_drogas) %>%
+  st_transform(crs = 31983)
+```
+
+```{r}
+print("Colunas em h3_roubo:")
+print(colnames(h3_roubo))
+print("Colunas em h3_drogas:")
+print(colnames(h3_drogas))
+```
+
+```{r}
+# Assegurar que ambos os data frames espaciais estão no mesmo CRS
+h3_roubo <- st_transform(h3_roubo, crs = st_crs(h3_drogas))
+
+# Encontrar os vizinhos mais próximos
+nearest_idx <- st_nearest_feature(h3_roubo, h3_drogas)
+
+# Unir os dados com base nos índices dos vizinhos mais próximos
+h3_roubo_drogas <- cbind(h3_roubo, h3_drogas[nearest_idx,])
+
+# Agora, remova a coluna de geometria duplicada (se necessário)
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  select(-geometry.1)  # Remova a coluna de geometria duplicada
+
+# Visualize as primeiras linhas para verificar
+head(h3_roubo_drogas)
+```
+```{r}
+# *** Diagnóstico importante: Verificar NAs antes de converter para Spatial ***
+print(paste("Valores NA em contagem (roubo) antes da conversão:", sum(is.na(h3_roubo_drogas$contagem)))) # contagem original de roubo
+print(paste("Valores NA em contagem (drogas) antes da conversão:", sum(is.na(h3_roubo_drogas$contagem.1)))) # contagem da junção
+
+# Conversão e limpeza ANTES de converter para Spatial
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  mutate(contagem = as.numeric(as.character(contagem)),
+         contagem.1 = as.numeric(as.character(contagem.1))) %>%
+  filter(!is.na(contagem) & !is.na(contagem.1) & !is.nan(contagem) & !is.nan(contagem.1) & !is.infinite(contagem) & !is.infinite(contagem.1))
+```
+
+```{r}
+# Preparar os dados para GWR (CONVERTER PARA SPATIAL DEPOIS DE LIMPAR)
+h3_roubo_drogas_sp <- as(h3_roubo_drogas, "Spatial")
+
+# Verificações adicionais (agora DEVE funcionar)
+print(class(h3_roubo_drogas_sp$contagem))
+print(class(h3_roubo_drogas_sp$contagem.1))
+
+print(paste("Número de linhas ANTES da filtragem:", nrow(h3_roubo_drogas_sp)))
+```
+```{r}
+# Certifique-se de que 'contagem.x' e 'contagem.y' são variáveis numéricas (redundante, mas seguro)
+h3_roubo_drogas_sp$contagem.x <- as.numeric(h3_roubo_drogas_sp$contagem)  # Use a coluna original "contagem"
+h3_roubo_drogas_sp$contagem.y <- as.numeric(h3_roubo_drogas_sp$contagem.1) # Use a coluna junta "contagem.1"
+# Verificar se há valores NA nas variáveis usadas na regressão
+print(paste("Valores NA em contagem.x:", sum(is.na(h3_roubo_drogas_sp$contagem.x))))
+print(paste("Valores NaN em contagem.x:", sum(is.nan(h3_roubo_drogas_sp$contagem.x))))
+print(paste("Valores Inf em contagem.x:", sum(is.infinite(h3_roubo_drogas_sp$contagem.x))))
+
+print(paste("Valores NA em contagem.y:", sum(is.na(h3_roubo_drogas_sp$contagem.y))))
+print(paste("Valores NaN em contagem.y:", sum(is.nan(h3_roubo_drogas_sp$contagem.y))))
+print(paste("Valores Inf em contagem.y:", sum(is.infinite(h3_roubo_drogas_sp$contagem.y))))
+```
+```{r}
+# Preparar os dados para GWR
+h3_roubo_drogas_sp <- as(h3_roubo_drogas, "Spatial")
+
+# Certifique-se de que 'contagem.x' e 'contagem.y' são variáveis numéricas
+h3_roubo_drogas_sp$contagem.x <- as.numeric(h3_roubo_drogas_sp$contagem)  # Use a coluna original "contagem"
+h3_roubo_drogas_sp$contagem.y <- as.numeric(h3_roubo_drogas_sp$contagem.1) # Use a coluna junta "contagem.1"
+```
+```{r}
+# Definir a largura de banda adaptativa usando cross-validation
+# A largura de banda (bandwidth) é um parâmetro crucial na GWR. Ela determina o tamanho da janela espacial usada para ponderar as observações vizinhas.
+# Uma largura de banda adaptativa permite que o tamanho da janela varie espacialmente, ajustando-se à densidade dos dados.
+# Cross-validation (CV) é uma técnica para selecionar a largura de banda que minimiza o erro de previsão.
+bw_gwr <- bw.gwr(contagem.x ~ contagem.y, 
+                 data = h3_roubo_drogas_sp, 
+                 approach = "CV", 
+                 kernel = "gaussian", 
+                 adaptive = TRUE)
+print(paste("Tamanho da banda utilizado:", bw_gwr))  # Imprime o tamanho da banda
+```
+```{r}
+# Executar o modelo GWR
+# A função gwr.basic executa o modelo GWR.
+# O parâmetro 'contagem.x ~ contagem.y' especifica a fórmula do modelo, onde 'contagem.x' é a variável dependente e 'contagem.y' é a variável independente.
+# O parâmetro 'bw' especifica a largura de banda calculada usando bw.gwr.
+# O parâmetro 'kernel' especifica a função kernel usada para ponderar as observações vizinhas. O kernel gaussiano é uma escolha comum.
+# Os parâmetros 'hatmatrix = TRUE' e 'se.fit = TRUE' solicitam o cálculo da matriz hat e dos erros padrão dos coeficientes, respectivamente.
+gwr_model <- gwr.basic(contagem.x ~ contagem.y, 
+                       data = h3_roubo_drogas_sp, 
+                       bw = bw_gwr, 
+                       kernel = "gaussian", 
+                       adaptive = TRUE)
+
+# Imprimir os resultados do modelo GWR
+# Imprimir os resultados do modelo GWR fornece informações sobre os coeficientes locais, os erros padrão, os valores t e os valores p.
+# Essas informações podem ser usadas para avaliar a significância estatística da relação entre as variáveis e para identificar áreas onde a relação é mais forte ou mais fraca.
+print(gwr_model)
+```
+
+```{r}
+# Converter os resultados do GWR de volta para um objeto sf
+# Os resultados do modelo GWR são armazenados em um objeto SDF (Spatial Data Frame).
+# Para facilitar o mapeamento, é útil converter o SDF de volta para um objeto sf.
+gwr_results_sf <- st_as_sf(gwr_model$SDF)
+
+# Adicionar os coeficientes locais ao objeto sf
+# Os coeficientes locais representam a relação entre as variáveis em cada localidade.
+# Adicionar os coeficientes locais ao objeto sf permite mapeá-los e visualizar a variação espacial da relação.
+h3_roubo_drogas$coef_drogas <- gwr_results_sf$contagem.y
+
+# Criar mapas dos Coeficientes Locais (β), Valores Previstos (ŷ) e Resíduos
+# tmap é um pacote R para criar mapas temáticos.
+# tmap_mode("view") define o modo de visualização para interativo, permitindo explorar os mapas com zoom e pan.
+tmap_mode("view")
+```
+
+```{r}
+# Extrair os valores previstos e resíduos do objeto gwr_model
+h3_roubo_drogas$coef_drogas <- gwr_model$SDF$contagem.y 
+h3_roubo_drogas$pred <- gwr_model$SDF$yhat  # Adicione os valores previstos
+h3_roubo_drogas$residuals <- gwr_model$SDF$residual  # Adicione os resíduos
+
+# Mapeamento dos resultados do GWR
+tmap_mode("view")
+
+# Mapa dos Coeficientes Locais
+map_coef <- tm_shape(h3_roubo_drogas) +
+  tm_fill("coef_drogas", title. = "Coeficiente Local de Drogas") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Coeficientes Locais de Drogas")
+
+# Mapa dos Valores Previstos
+map_pred <- tm_shape(h3_roubo_drogas) +
+  tm_fill("pred", title. = "Valores Previstos de Roubos") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Valores Previstos de Roubos")
+
+# Mapa dos Resíduos
+map_resid <- tm_shape(h3_roubo_drogas) +
+  tm_fill("residuals", title. = "Resíduos") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Resíduos")
+
+# Visualizar os mapas
+map_coef
+map_pred
+map_resid
+
+```
+```{r}
+# Converter de volta para sf para usar st_write
+h3_roubo_drogas_sf <- st_as_sf(h3_roubo_drogas)
+
+# Salvar o shapefile com os resultados
+st_write(h3_roubo_drogas_sf, "h3_roubo_drogas_gwr.shp", delete_layer = TRUE)
+```
+```{r}
+# **Gráficos de Dispersão**
+
+# 1. Valores Previstos vs. Observados
+ggplot(h3_roubo_drogas, aes(x = pred, y = contagem)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") + # Linha de 45 graus
+  labs(title = "Valores Previstos vs. Observados",
+       x = "Valores Previstos (GWR)",
+       y = "Valores Observados (Contagem de Roubos)") +
+  theme_bw()
+
+# 2. Resíduos vs. Valores Previstos
+ggplot(h3_roubo_drogas, aes(x = pred, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") + # Linha horizontal em zero
+  labs(title = "Resíduos vs. Valores Previstos",
+       x = "Valores Previstos (GWR)",
+       y = "Resíduos") +
+  theme_bw()
+
+# 3. Coeficientes Locais vs. Contagem de Drogas
+ggplot(h3_roubo_drogas, aes(x = contagem.1, y = coef_drogas)) +
+  geom_point() +
+  labs(title = "Coeficientes Locais vs. Contagem de Drogas",
+       x = "Contagem de Drogas",
+       y = "Coeficientes Locais (Drogas)") +
+  theme_bw()
+
+# 4. Resíduos vs. Coordenadas Espaciais
+# Calcular os centroides das geometrias
+h3_roubo_drogas$centroid_x <- st_coordinates(st_centroid(h3_roubo_drogas$geometry))[,1]
+h3_roubo_drogas$centroid_y <- st_coordinates(st_centroid(h3_roubo_drogas$geometry))[,2]
+
+# Gráfico de Resíduos vs. Coordenada X
+ggplot(h3_roubo_drogas, aes(x = centroid_x, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Resíduos vs. Coordenada X",
+       x = "Coordenada X",
+       y = "Resíduos") +
+  theme_bw()
+
+# Gráfico de Resíduos vs. Coordenada Y
+ggplot(h3_roubo_drogas, aes(x = centroid_y, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Resíduos vs. Coordenada Y",
+       x = "Coordenada Y",
+       y = "Resíduos") +
+  theme_bw()
+```
+```{r}
+
+
+
+# Este notebook R realiza uma análise de regressão ponderada geograficamente (GWR),
+# cria gráficos de dispersão para avaliar os resultados do modelo e realiza uma regressão global
+# para comparar os coeficientes estimados.
+
+# Função para verificar e instalar pacotes
+install_if_missing <- function(packages) {
+  new_packages <- packages[!packages %in% installed.packages()[, "Package"]]
+  if (length(new_packages) > 0) {
+    install.packages(new_packages)
+  }
+}
+
+# Lista de pacotes necessários
+necessary_packages <- c("sf", "spdep", "tidyverse", "ncf", "tmap", "GWmodel", "dplyr", "ggplot2")
+install_if_missing(necessary_packages)
+
+# Carregar os pacotes
+suppressPackageStartupMessages({
+  library(sf)
+  library(spdep)
+  library(tidyverse)
+  library(ncf)
+  library(tmap)
+  library(GWmodel)
+  library(dplyr)
+  library(ggplot2) # Garante que o ggplot2 está carregado
+})
+
+# Definir os caminhos para os shapefiles
+shapefile_path_roubo <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
+
+# Ler os shapefiles
+h3_roubo <- st_read(shapefile_path_roubo) %>%
+  st_transform(crs = 31983)
+
+h3_drogas <- st_read(shapefile_path_drogas) %>%
+  st_transform(crs = 31983)
+
+# Assegurar que ambos os data frames espaciais estão no mesmo CRS
+h3_roubo <- st_transform(h3_roubo, crs = st_crs(h3_drogas))
+
+# Encontrar os vizinhos mais próximos
+nearest_idx <- st_nearest_feature(h3_roubo, h3_drogas)
+
+# Unir os dados com base nos índices dos vizinhos mais próximos
+h3_roubo_drogas <- cbind(h3_roubo, h3_drogas[nearest_idx,])
+
+# Agora, remova a coluna de geometria duplicada (se necessário)
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  select(-geometry.1)  # Remova a coluna de geometria duplicada
+
+# Conversão e limpeza ANTES de converter para Spatial
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  mutate(contagem = as.numeric(as.character(contagem)),
+         contagem.1 = as.numeric(as.character(contagem.1))) %>%
+  filter(!is.na(contagem) & !is.na(contagem.1) & !is.nan(contagem) & !is.nan(contagem.1) & !is.infinite(contagem) & !is.infinite(contagem.1))
+
+# Preparar os dados para GWR (CONVERTER PARA SPATIAL DEPOIS DE LIMPAR)
+h3_roubo_drogas_sp <- as(h3_roubo_drogas, "Spatial")
+
+# Certifique-se de que 'contagem.x' e 'contagem.y' são variáveis numéricas
+h3_roubo_drogas_sp$contagem.x <- as.numeric(h3_roubo_drogas_sp$contagem)  # Use a coluna original "contagem"
+h3_roubo_drogas_sp$contagem.y <- as.numeric(h3_roubo_drogas_sp$contagem.1) # Use a coluna junta "contagem.1"
+
+# Definir a largura de banda adaptativa usando cross-validation
+bw_gwr <- bw.gwr(contagem.x ~ contagem.y,
+                 data = h3_roubo_drogas_sp,
+                 approach = "CV",
+                 kernel = "gaussian",
+                 adaptive = TRUE)
+
+# Executar o modelo GWR
+gwr_model <- gwr.basic(contagem.x ~ contagem.y,
+                       data = h3_roubo_drogas_sp,
+                       bw = bw_gwr,
+                       kernel = "gaussian",
+                       adaptive = TRUE)
+
+# Extrair os valores previstos e resíduos do objeto gwr_model
+h3_roubo_drogas$coef_drogas <- gwr_model$SDF$contagem.y  # já existia
+h3_roubo_drogas$pred <- gwr_model$SDF$yhat  # Adicione os valores previstos
+h3_roubo_drogas$residuals <- gwr_model$SDF$residual  # Adicione os resíduos
+
+# **Regressão Global**
+# A regressão global serve como um ponto de referência para comparar com os resultados do GWR.
+# Ela assume que a relação entre roubos e contagem de drogas é constante em toda a área de estudo.
+global_model <- lm(contagem ~ contagem.1, data = h3_roubo_drogas)
+summary(global_model)
+
+# Extrair coeficientes da regressão global
+global_coef <- coef(global_model)[2] # Coeficiente da contagem de drogas
+global_intercept <- coef(global_model)[1] # Intercepto
+
+# Adicionar valores ajustados da regressão global ao dataframe
+h3_roubo_drogas$global_pred <- predict(global_model)
+
+# Converter de volta para sf para usar st_write
+h3_roubo_drogas_sf <- st_as_sf(h3_roubo_drogas)
+
+# Salvar o shapefile com os resultados
+st_write(h3_roubo_drogas_sf, "h3_roubo_drogas_gwr.shp", delete_layer = TRUE)
+
+# **Gráficos de Dispersão**
+
+# 1. Valores Previstos (GWR) vs. Observados
+# Este gráfico ajuda a avaliar o quão bem o modelo GWR está prevendo os valores reais de roubo.
+# Idealmente, os pontos devem se agrupar próximos à linha de 45 graus.
+ggplot(h3_roubo_drogas, aes(x = pred, y = contagem)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") + # Linha de 45 graus
+  labs(title = "Valores Previstos (GWR) vs. Observados",
+       x = "Valores Previstos (GWR)",
+       y = "Valores Observados (Contagem de Roubos)") +
+  theme_bw()
+
+# 2. Valores Previstos (Global) vs. Observados
+# Similar ao gráfico anterior, mas para o modelo de regressão global.
+# Comparar este gráfico com o anterior ajuda a determinar se o GWR oferece uma melhoria em relação ao modelo global.
+ggplot(h3_roubo_drogas, aes(x = global_pred, y = contagem)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") + # Linha de 45 graus
+  labs(title = "Valores Previstos (Global) vs. Observados",
+       x = "Valores Previstos (Global)",
+       y = "Valores Observados (Contagem de Roubos)") +
+  theme_bw()
+
+# 3. Coeficientes Locais vs. Contagem de Drogas
+# Este gráfico examina a relação entre os coeficientes locais estimados pelo GWR e a contagem de drogas.
+# Ele pode revelar padrões interessantes sobre como a influência da contagem de drogas nos roubos varia espacialmente.
+# Por exemplo, pode haver uma relação não linear ou uma tendência de aumento/diminuição do coeficiente com o aumento da contagem de drogas.
+ggplot(h3_roubo_drogas, aes(x = contagem.1, y = coef_drogas)) +
+  geom_point() +
+  labs(title = "Coeficientes Locais (GWR) vs. Contagem de Drogas",
+       x = "Contagem de Drogas",
+       y = "Coeficientes Locais (GWR)") +
+  theme_bw()
+
+# 4. Resíduos (GWR) vs. Valores Previstos (GWR)
+# Este gráfico ajuda a verificar a homocedasticidade (variância constante dos erros) e a linearidade do modelo GWR.
+# Idealmente, os resíduos devem ser distribuídos aleatoriamente em torno de zero, sem padrões óbvios.
+# Padrões como um funil ou uma curva podem indicar problemas com o modelo.
+ggplot(h3_roubo_drogas, aes(x = pred, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") + # Linha horizontal em zero
+  labs(title = "Resíduos (GWR) vs. Valores Previstos (GWR)",
+       x = "Valores Previstos (GWR)",
+       y = "Resíduos (GWR)") +
+  theme_bw()
+
+# 5. Resíduos vs. Coordenadas Espaciais
+# Calcular os centroides das geometrias
+h3_roubo_drogas$centroid_x <- st_coordinates(st_centroid(h3_roubo_drogas$geometry))[,1]
+h3_roubo_drogas$centroid_y <- st_coordinates(st_centroid(h3_roubo_drogas$geometry))[,2]
+
+# Gráfico de Resíduos vs. Coordenada X
+# Estes gráficos ajudam a verificar se há padrões espaciais nos resíduos.
+# Se houver um padrão, isso pode indicar que o modelo não está capturando toda a variação espacial nos dados.
+ggplot(h3_roubo_drogas, aes(x = centroid_x, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Resíduos (GWR) vs. Coordenada X",
+       x = "Coordenada X",
+       y = "Resíduos (GWR)") +
+  theme_bw()
+
+# Gráfico de Resíduos vs. Coordenada Y
+ggplot(h3_roubo_drogas, aes(x = centroid_y, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Resíduos (GWR) vs. Coordenada Y",
+       x = "Coordenada Y",
+       y = "Resíduos (GWR)") +
+  theme_bw()
+
+# Mapeamento dos resultados do GWR
+tmap_mode("view")
+
+# Mapa dos Coeficientes Locais
+# Este mapa mostra como o coeficiente da contagem de drogas varia espacialmente.
+# Áreas com coeficientes mais altos indicam onde a contagem de drogas tem uma influência maior nos roubos.
+map_coef <- tm_shape(h3_roubo_drogas) +
+  tm_fill("coef_drogas", title. = "Coeficiente Local de Drogas") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Coeficientes Locais de Drogas")
+
+# Mapa dos Valores Previstos (GWR)
+# Este mapa mostra os valores previstos de roubos pelo modelo GWR.
+# Ele pode ser usado para identificar áreas com alto risco de roubo.
+map_pred <- tm_shape(h3_roubo_drogas) +
+  tm_fill("pred", title. = "Valores Previstos de Roubos (GWR)") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Valores Previstos de Roubos (GWR)")
+
+# Mapa dos Resíduos (GWR)
+# Este mapa mostra os resíduos do modelo GWR.
+# Ele pode ser usado para identificar áreas onde o modelo está subestimando ou superestimando os roubos.
+map_resid <- tm_shape(h3_roubo_drogas) +
+  tm_fill("residuals", title. = "Resíduos (GWR)") + # correção para tmap v4
+  tm_borders() +
+  tm_layout(title = "Mapa dos Resíduos (GWR)")
+
+# Visualizar os mapas
+map_coef
+map_pred
+map_resid
+```
+
