@@ -1,0 +1,211 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Instalar e carregar pacotes necessários
+necessary_packages <- c("sf", "spdep", "tidyverse", "ncf", "tmap", "GWmodel", "dplyr", "ggplot2")
+install_if_missing <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if (length(new_packages)) install.packages(new_packages)
+}
+install_if_missing(necessary_packages)
+
+suppressPackageStartupMessages({
+  library(sf)
+  library(spdep)
+  library(tidyverse)
+  library(ncf)
+  library(tmap)
+  library(GWmodel)
+  library(dplyr)
+  library(ggplot2) # Adicionando ggplot2 para os gráficos
+})
+
+# Ler e transformar os shapefiles
+shapefile_path_roubo <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
+
+h3_roubo <- st_read(shapefile_path_roubo) %>% st_transform(31983)
+h3_drogas <- st_read(shapefile_path_drogas) %>% st_transform(31983)
+
+# Assegurar o mesmo CRS (Sistema de Referência de Coordenadas)
+h3_roubo <- st_transform(h3_roubo, crs = st_crs(h3_drogas))
+
+# Encontrar vizinhos mais próximos usando st_nearest_feature
+nearest_idx <- st_nearest_feature(h3_roubo, h3_drogas)
+
+# Unir dados usando os índices dos vizinhos mais próximos
+h3_roubo_drogas <- cbind(h3_roubo, h3_drogas[nearest_idx,])
+
+# Remover coluna de geometria duplicada resultante da junção
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  select(-geometry.1)
+
+# Diagnóstico de NAs (Not Available)
+print("Valores NA em contagem (roubo) antes da conversão:")
+print(sum(is.na(h3_roubo_drogas$contagem)))
+print("Valores NA em contagem (drogas) antes da conversão:")
+print(sum(is.na(h3_roubo_drogas$contagem.1)))
+
+# Conversão e limpeza de dados
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  mutate(contagem = as.numeric(as.character(contagem)),
+         contagem.1 = as.numeric(as.character(contagem.1))) %>%
+  filter(!is.na(contagem) & !is.na(contagem.1) & !is.nan(contagem) & !is.nan(contagem.1) & !is.infinite(contagem) & !is.infinite(contagem.1))
+
+# Preparar dados para GWR (Geographically Weighted Regression)
+# Transformação Logarítmica para tratar outliers e reduzir assimetria
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  mutate(log_contagem = log1p(contagem),  # log1p lida com zeros e adiciona 1
+         log_contagem.1 = log1p(contagem.1))
+
+# Correção de nomes de colunas para evitar ambiguidades
+h3_roubo_drogas <- h3_roubo_drogas %>%
+  rename(roubo = contagem,
+         drogas = contagem.1)
+
+# Verificar NAs, NaNs e valores infinitos nas variáveis da regressão
+print("Valores NA em log_contagem:")
+print(sum(is.na(h3_roubo_drogas$log_contagem)))
+print("Valores NaN em log_contagem:")
+print(sum(is.nan(h3_roubo_drogas$log_contagem)))
+print("Valores Inf em log_contagem:")
+print(sum(is.infinite(h3_roubo_drogas$log_contagem)))
+print("Valores NA em log_contagem.1:")
+print(sum(is.na(h3_roubo_drogas$log_contagem.1)))
+print("Valores NaN em log_contagem.1:")
+print(sum(is.nan(h3_roubo_drogas$log_contagem.1)))
+print("Valores Inf em log_contagem.1:")
+print(sum(is.infinite(h3_roubo_drogas$log_contagem.1)))
+
+# Converter o objeto `sf` para `Spatial`
+h3_roubo_drogas_sp <- as(h3_roubo_drogas, "Spatial")
+
+# Correção de nomes de colunas para evitar ambiguidades
+# Renomeando as colunas 'contagem' e 'contagem.1' para 'contagem.x' e 'contagem.y' respectivamente
+# Isso garante que as colunas sejam referenciadas corretamente na regressão.
+# A ambiguidade nos nomes das colunas pode levar a erros de sintaxe e resultados inesperados.
+h3_roubo_drogas_sp$log_contagem <- h3_roubo_drogas$log_contagem  # Use a coluna log original "contagem"
+h3_roubo_drogas_sp$log_contagem.1 <- h3_roubo_drogas$log_contagem.1 # Use a coluna log junta "contagem.1"
+
+# Definir largura de banda adaptativa usando Cross-Validation (CV)
+bw_gwr <- bw.gwr(log_contagem ~ log_contagem.1,
+                 data = h3_roubo_drogas_sp,
+                 approach = "CV",
+                 kernel = "gaussian",
+                 adaptive = TRUE)
+print("Tamanho da banda utilizado:")
+print(bw_gwr)
+
+# Executar o modelo GWR (Geographically Weighted Regression)
+gwr_model <- gwr.basic(log_contagem ~ log_contagem.1,
+                       data = h3_roubo_drogas_sp,
+                       bw = bw_gwr,
+                       kernel = "gaussian",
+                       adaptive = TRUE)
+
+# Imprimir resultados do modelo GWR
+print(gwr_model)
+
+# Extrair informações importantes para análise
+local_r2 <- gwr_model$localR2 # Ajuste local, para cada observação
+residuos <- gwr_model$residuals # Resíduos para cada observação
+coeficientes <- gwr_model$SDF$log_contagem.1 # Coeficientes locais
+valores_ajustados <- gwr_model$fitted.values # Valores ajustados pelo modelo
+
+# Converter resultados do GWR para sf (Simple Features)
+gwr_results_sf <- st_as_sf(gwr_model$SDF)
+
+# Adicionar os coeficientes locais ao objeto sf
+h3_roubo_drogas$coef_drogas <- gwr_results_sf$log_contagem.1
+
+# Extrair valores previstos e resíduos do modelo GWR
+h3_roubo_drogas$pred <- gwr_model$SDF$yhat  # Adiciona os valores previstos
+h3_roubo_drogas$residuals <- gwr_model$SDF$residual  # Adiciona os resíduos
+
+# Mapa de Valores Previstos vs. Observados (Comparação Lado a Lado)
+tmap_mode("view")
+
+# Preparar os dados para os gráficos e mapas
+h3_roubo_drogas_df <- as.data.frame(h3_roubo_drogas)
+
+# Gráfico de Dispersão (Scatter Plot)
+scatter_plot <- ggplot(data = h3_roubo_drogas_df, aes(x = log_contagem, y = pred)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") + # Linha de identidade
+  xlab("Valores Observados (Roubos) - Log") +
+  ylab("Valores Previstos (Roubos) - Log") +
+  ggtitle("Gráfico de Dispersão: Valores Previstos vs. Observados (Log)") +
+  theme_bw()
+print(scatter_plot)
+
+# Mapa de Valores Previstos vs. Observados (Comparação Lado a Lado)
+tmap_mode("view")
+
+map_observed <- tm_shape(h3_roubo_drogas) +
+  tm_fill("log_contagem", style = "jenks", palette = "YlOrRd", title = "Valores Observados (Log)") +
+  tm_borders() +
+  tm_layout(title = "Valores Observados (Roubos) - Log")
+
+map_predicted <- tm_shape(h3_roubo_drogas) +
+  tm_fill("pred", style = "jenks", palette = "YlOrRd", title = "Valores Previstos (Log)") +
+  tm_borders() +
+  tm_layout(title = "Valores Previstos (Roubos) - Log")
+
+# Combine os mapas lado a lado
+comparison_map <- tmap_arrange(map_observed, map_predicted, ncol = 2)
+print(comparison_map)
+
+# Mapa dos Resíduos
+map_resid <- tm_shape(h3_roubo_drogas) +
+  tm_fill(
+    "residuals",
+    title = "Resíduos"
+  ) +
+  tm_borders() +
+  tm_layout(tm_title = "Mapa dos Resíduos")
+print(map_resid) # Imprimindo o mapa de resíduos
+
+# Mapa dos P-valores
+h3_roubo_drogas$p_value_drogas <- gwr_model$SDF$log_contagem.1_TV
+
+map_p_value <- tm_shape(h3_roubo_drogas) +
+  tm_fill("p_value_drogas", style = "quantile", palette = "RdYlGn", title = "P-valor Local de Drogas") +
+  tm_borders() +
+  tm_layout(title = "Mapa dos P-valores Locais de Drogas")
+print(map_p_value) # Imprimindo o mapa de p-valores
+
+# Mapa dos Coeficientes Locais
+map_coef <- tm_shape(h3_roubo_drogas) +
+  tm_fill("coef_drogas", style = "quantile", palette = "RdBu", title = "Coeficiente Local de Drogas") +
+  tm_borders() +
+  tm_layout(title = "Mapa dos Coeficientes Locais de Drogas")
+print(map_coef) # Imprimindo o mapa de coeficientes
+
+# Mapa do R² Local
+h3_roubo_drogas$local_r2 <- gwr_model$SDF$Local_R2
+
+map_local_r2 <- tm_shape(h3_roubo_drogas) +
+  tm_fill("local_r2", style = "quantile", palette = "Greens", title = "R² Local") +
+  tm_borders() +
+  tm_layout(title = "Mapa do R² Local")
+print(map_local_r2) # Imprimindo o mapa de R² local
+
+# Mapa dos Valores Previstos
+h3_roubo_drogas$valores_previstos <- gwr_model$SDF$yhat
+
+map_valores_previstos <- tm_shape(h3_roubo_drogas) +
+  tm_fill("valores_previstos", style = "quantile", palette = "OrRd", title = "Valores Previstos") +
+  tm_borders() +
+  tm_layout(title = "Mapa dos Valores Previstos")
+print(map_valores_previstos) # Imprimindo o mapa de valores previstos
+
+# Salvar os resultados em um shapefile
+output_shapefile_path <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados_gwr.shp" # Substitua pelo caminho desejado
+st_write(h3_roubo_drogas, output_shapefile_path, driver = "ESRI Shapefile")
+
+print(paste("Resultados salvos em:", output_shapefile_path))
+```
+
