@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r}
@@ -24,8 +26,8 @@ suppressPackageStartupMessages({
 })
 
 # Ler e transformar os shapefiles
-shapefile_path_roubo <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
-shapefile_path_drogas <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
+shapefile_path_roubo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
 
 h3_roubo <- st_read(shapefile_path_roubo) %>% st_transform(31983)
 h3_drogas <- st_read(shapefile_path_drogas) %>% st_transform(31983)
@@ -203,9 +205,9 @@ map_valores_previstos <- tm_shape(h3_roubo_drogas) +
 print(map_valores_previstos) # Imprimindo o mapa de valores previstos
 
 # Salvar os resultados em um shapefile
-output_shapefile_path <- "~/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados_gwr.shp" # Substitua pelo caminho desejado
+output_shapefile_path <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/gwr/gwr/shpresultados_gwr.shp" # Substitua pelo caminho desejado
 st_write(h3_roubo_drogas, output_shapefile_path, driver = "ESRI Shapefile")
 
-print(paste("Resultados salvos em:", output_shapefile_path))
+#print(paste("Resultados salvos em:", output_shapefile_path))
 ```
 
