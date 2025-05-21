@@ -33,8 +33,8 @@ suppressPackageStartupMessages({
 })
 ```
 ```{r}
-shapefile_path_roubo <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
-shapefile_path_drogas <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp" 
+shapefile_path_roubo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
 ```
 
 ```{r}
@@ -198,7 +198,7 @@ map_resid
 h3_roubo_drogas_sf <- st_as_sf(h3_roubo_drogas)
 
 # Salvar o shapefile com os resultados
-st_write(h3_roubo_drogas_sf, "h3_roubo_drogas_gwr.shp", delete_layer = TRUE)
+# st_write(h3_roubo_drogas_sf, "h3_roubo_drogas_gwr.shp", delete_layer = TRUE)
 ```
 ```{r}
 # **Gráficos de Dispersão**

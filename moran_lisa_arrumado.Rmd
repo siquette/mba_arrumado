@@ -34,7 +34,7 @@ suppressPackageStartupMessages({
 
 ```{r}
 # Caminho do arquivo shapefile
-shapefile_path <- "C:/Users/Vivian - H2R/Downloads/mba/git/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path <- "C:/Users/Rodrigo - H2R/Downloads/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
 
 # Leitura e projeção dos dados
 h3_roubo_moran <- st_read(shapefile_path) %>%

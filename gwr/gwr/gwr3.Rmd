@@ -1,0 +1,938 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# --------------------------------------------------------------------------
+# ETAPA 0: CONFIGURAÇÃO E CARREGAMENTO DE PACOTES
+# --------------------------------------------------------------------------
+# Instalar e carregar pacotes necessários.
+# Esta etapa garante que todos os pacotes R necessários para a análise estejam instalados.
+# Se um pacote estiver faltando, ele será instalado automaticamente.
+necessary_packages <- c("sf", "spdep", "tidyverse", "GWmodel", "tmap", "ggplot2", "ggpubr", "RColorBrewer", "knitr")
+install_if_missing <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if (length(new_packages)) install.packages(new_packages, dependencies = TRUE)
+}
+install_if_missing(necessary_packages)
+
+# Carregar os pacotes.
+# Carrega os pacotes instalados para que as funções e dados dentro deles estejam disponíveis para uso.
+# `suppressPackageStartupMessages` evita que mensagens de carregamento poluam o console.
+suppressPackageStartupMessages({
+  library(sf)          # Para manipulação de dados espaciais (objetos sf).
+  library(spdep)       # Para análise de padrões espaciais (autocorrelação, vizinhança).
+  library(tidyverse)   # Para manipulação e transformação de dados (dplyr, tidyr, etc.).
+  library(GWmodel)     # Para modelagem de regressão ponderada geograficamente (GWR).
+  library(tmap)        # Para criação de mapas temáticos (estáticos e interativos).
+  library(ggplot2)     # Para criação de gráficos estatísticos.
+  library(ggpubr)      # Para facilitar a criação de gráficos publicáveis.
+  library(RColorBrewer) # Para paletas de cores predefinidas.
+  library(knitr)       # Para geração de relatórios dinâmicos (integração de código R e texto).
+})
+
+# tmap_options(check.and.fix = TRUE) # REMOVIDO - Não é uma opção válida em tmap v3/v4
+tmap_mode("view") # Define o modo de visualização padrão para interativo
+# Define o modo de visualização do `tmap` para "view", que cria mapas interativos no navegador.
+# Alternativamente, `tmap_mode("plot")` gera mapas estáticos para impressão ou relatórios.
+
+# --------------------------------------------------------------------------
+# ETAPA 1: CARREGAMENTO E PREPARAÇÃO INICIAL DOS DADOS - USANDO JUNÇÃO ESPACIAL
+# --------------------------------------------------------------------------
+print("--- ETAPA 1: CARREGAMENTO E PREPARAÇÃO DOS DADOS ---")
+# Caminhos para os shapefiles.
+# Especifica os caminhos para os arquivos shapefile contendo os dados de roubos e drogas.
+# Certifique-se de que os caminhos estejam corretos e apontem para os arquivos existentes.
+shapefile_path_roubo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_roubo_merge/content/h3_roubo_merge.shp"
+shapefile_path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/h3_merge_drogas/content/h3_merge_drogas.shp"
+
+# Definir CRS alvo (EPSG:31983 - SIRGAS 2000 / UTM zone 23S).
+# Usar um CRS projetado é crucial para cálculos de distância e área precisos.
+# Define o sistema de coordenadas de referência (CRS) para o qual os dados serão transformados.
+# EPSG:31983 é o SIRGAS 2000 / UTM zone 23S, um sistema projetado adequado para a área de interesse.
+# Usar um CRS projetado é essencial para garantir que as distâncias e áreas sejam medidas corretamente,
+# o que é fundamental para a análise espacial, especialmente em GWR.
+target_crs <- st_crs(31983)
+
+# Ler shapefiles e transformar para o CRS alvo.
+# Carrega os shapefiles usando `st_read` do pacote `sf` e os transforma para o CRS definido.
+# A transformação garante que ambos os datasets estejam no mesmo sistema de coordenadas para análise.
+h3_roubo_raw <- st_read(shapefile_path_roubo) %>% st_transform(target_crs)
+h3_drogas_raw <- st_read(shapefile_path_drogas) %>% st_transform(target_crs)
+
+print("--- Informações Iniciais: h3_roubo_raw ---")
+print(paste("Número de feições (roubos):", nrow(h3_roubo_raw)))
+print("Nomes das colunas (roubos):"); print(names(h3_roubo_raw))
+
+print("--- Informações Iniciais: h3_drogas_raw ---")
+print(paste("Número de feições (drogas):", nrow(h3_drogas_raw)))
+print("Nomes das colunas (drogas):"); print(names(h3_drogas_raw))
+
+# Definir nomes das colunas originais para contagem e ID.
+# !! AJUSTE ESTES NOMES CONFORME SEUS DADOS !!
+# Define os nomes das colunas que contêm a contagem de roubos, a contagem de drogas e o ID único de cada hexágono.
+# É crucial que esses nomes correspondam exatamente aos nomes das colunas nos seus shapefiles.
+# Se os nomes estiverem incorretos, a análise subsequente falhará.
+col_contagem_roubos_original <- "contagem"
+col_contagem_drogas_original <- "contagem"
+col_id_roubos_original <- "h3_index" # Importante para agrupar se houver múltiplas interseções
+
+# Renomear colunas de contagem para evitar conflitos na junção.
+# Renomeia as colunas de contagem para evitar conflitos quando os dados de roubos e drogas forem unidos.
+# Isso garante que as colunas de contagem de cada dataset sejam claramente identificadas após a junção.
+if (col_contagem_roubos_original %in% names(h3_roubo_raw)) {
+  h3_roubo_renamed <- h3_roubo_raw %>% rename(contagem_roubos = !!sym(col_contagem_roubos_original))
+} else {
+  stop(paste("Coluna '", col_contagem_roubos_original, "' não encontrada em h3_roubo_raw.", sep=""))
+}
+
+if (col_contagem_drogas_original %in% names(h3_drogas_raw)) {
+  h3_drogas_renamed <- h3_drogas_raw %>% rename(contagem_drogas = !!sym(col_contagem_drogas_original))
+} else {
+  stop(paste("Coluna '", col_contagem_drogas_original, "' não encontrada em h3_drogas_raw.", sep=""))
+}
+
+# Realizar a junção espacial.
+# A junção espacial combina os dados de roubos e drogas com base na interseção espacial dos hexágonos.
+# `left = TRUE` mantém todos os hexágonos de roubo.
+print("Realizando junção espacial (st_join)...")
+h3_data_joined <- st_join(h3_roubo_renamed, h3_drogas_renamed, join = st_intersects, left = TRUE)
+# Realiza a junção espacial usando `st_join` do pacote `sf`.
+# `st_intersects` especifica que a junção deve ser baseada na interseção espacial dos hexágonos.
+# `left = TRUE` garante que todos os hexágonos do dataset de roubos sejam mantidos no resultado,
+# mesmo que não haja uma interseção correspondente no dataset de drogas (esses hexágonos terão valores NA para as colunas de drogas).
+
+print("--- Informações Pós-Junção Espacial Inicial ---")
+print(paste("Número de feições após junção inicial:", nrow(h3_data_joined)))
+print("Nomes das colunas após junção inicial:"); print(names(h3_data_joined))
+
+# Lidar com nomes de colunas de ID que podem ter sido duplicados (ex: h3_index.x, h3_index.y).
+# Manteremos o ID do shapefile de roubos (geralmente sufixado com .x) e o renomearemos.
+h3_data_processed <- h3_data_joined
+id_roubos_x <- paste0(col_id_roubos_original, ".x")
+id_roubos_y <- paste0(col_id_roubos_original, ".y")
+
+if (id_roubos_x %in% names(h3_data_joined)) {
+    h3_data_processed <- h3_data_joined %>%
+        rename(!!sym(col_id_roubos_original) := !!sym(id_roubos_x)) # Renomeia h3_index.x para h3_index
+    if (id_roubos_y %in% names(h3_data_processed)) {
+        h3_data_processed <- h3_data_processed %>% select(-!!sym(id_roubos_y)) # Remove h3_index.y
+    }
+    print(paste("Coluna ID de roubos '", id_roubos_x, "' renomeada para '", col_id_roubos_original, "'.", sep=""))
+} else if (!(col_id_roubos_original %in% names(h3_data_joined))) {
+    # Se nem col_id_roubos_original nem col_id_roubos_original.x existem, pode haver um problema.
+    # Criar um ID sequencial como fallback, mas isso assume que a ordem não será alterada.
+    warning(paste("Coluna de ID original '", col_id_roubos_original, "' (ou com sufixo .x) não encontrada após junção. Criando ID sequencial temporário 'temp_id_join'.", sep=""))
+    h3_data_processed$temp_id_join <- 1:nrow(h3_data_processed)
+    col_id_roubos_original <- "temp_id_join" # Usar este ID temporário para agrupamento
+}
+# Se col_id_roubos_original já existe sem sufixo, não faz nada aqui.
+
+print("Nomes das colunas após tratamento inicial de IDs:"); print(names(h3_data_processed))
+
+# TRATAMENTO DE MÚLTIPLAS INTERSEÇÕES:
+# Se a junção resultou em mais linhas do que o shapefile de roubos original,
+# significa que um hexágono de roubo intersectou múltiplos hexágonos de droga.
+# Precisamos agregar 'contagem_drogas' para cada hexágono de roubo único.
+# DECISÃO: Somar 'contagem_drogas'. Outras opções: mean(), first().
+if (nrow(h3_data_processed) > nrow(h3_roubo_renamed)) {
+    print(paste("Múltiplas interseções detectadas. Agregando 'contagem_drogas' por '", col_id_roubos_original, "' (somando).", sep=""))
+    if (!(col_id_roubos_original %in% names(h3_data_processed))) {
+        stop(paste("Erro crítico: Coluna de ID '", col_id_roubos_original, "' não encontrada para agrupamento após tratamento de nomes.", sep=""))
+    }
+    h3_data <- h3_data_processed %>%
+        group_by(!!sym(col_id_roubos_original)) %>%
+        summarise(
+            # Manter outras colunas do shapefile de roubos, pegando o primeiro valor (assumindo que são constantes por ID)
+            # Adicione aqui outras colunas do h3_roubo_renamed que você quer manter. Ex: first(outra_coluna_roubo)
+            contagem_roubos = first(contagem_roubos),
+            contagem_drogas = sum(contagem_drogas, na.rm = TRUE), # SOMA as drogas dos hexágonos intersectados
+            geometry = first(geometry) # Mantém a geometria do hexágono de roubo
+        ) %>%
+        ungroup()
+    print(paste("Número de feições após agregar múltiplas interseções:", nrow(h3_data)))
+} else {
+    h3_data <- h3_data_processed # Nenhuma agregação necessária se não houve aumento de linhas
+}
+# Trata o caso em que um hexágono de roubo se intersecta com múltiplos hexágonos de drogas.
+# Se o número de linhas após a junção for maior do que o número de hexágonos de roubo originais,
+# isso indica que alguns hexágonos de roubo se intersectaram com vários hexágonos de drogas.
+# Nesse caso, o código agrupa os dados pelo ID do hexágono de roubo e soma as contagens de drogas
+# para cada hexágono de roubo. Isso garante que cada hexágono de roubo tenha apenas uma contagem de drogas associada.
+# A função `first()` é usada para manter as outras colunas do shapefile de roubos,
+# assumindo que elas são constantes para cada ID de hexágono de roubo.
+# A geometria também é mantida usando `first(geometry)`.
+
+# Tratar NAs em 'contagem_drogas' que podem ter surgido da junção `left=TRUE`
+# ou se `sum(..., na.rm=TRUE)` resultou em 0 para um grupo que só tinha NAs.
+# Se após a soma ainda houver NAs (improvável com na.rm=TRUE, mas possível se todos os valores eram NA para um grupo),
+# ou se `contagem_drogas` se tornou 0 e você quer tratar isso de forma diferente.
+na_drogas_count <- sum(is.na(h3_data$contagem_drogas))
+print(paste("Número de NAs em 'contagem_drogas' após agregação:", na_drogas_count))
+if (na_drogas_count > 0) {
+    print("Removendo linhas com NA em 'contagem_drogas'.")
+    h3_data <- h3_data %>% filter(!is.na(contagem_drogas))
+    print(paste("Número de feições após remover NAs de 'contagem_drogas':", nrow(h3_data)))
+}
+
+# Limpeza final dos dados de contagem.
+# Converte as colunas de contagem para o tipo numérico e remove quaisquer linhas com valores NA, NaN ou infinitos.
+# Também garante que as contagens sejam não negativas, o que é essencial para a análise.
+h3_data <- h3_data %>%
+  mutate(
+    contagem_roubos = as.numeric(as.character(contagem_roubos)),
+    contagem_drogas = as.numeric(as.character(contagem_drogas))
+  ) %>%
+  filter(
+    !is.na(contagem_roubos) & !is.nan(contagem_roubos) & !is.infinite(contagem_roubos) &
+    !is.na(contagem_drogas) & !is.nan(contagem_drogas) & !is.infinite(contagem_drogas) &
+    contagem_roubos >= 0 & contagem_drogas >= 0 # Assegura que contagens são não-negativas
+  )
+
+if(nrow(h3_data) < 30) {
+  stop("Número de observações válidas após limpeza é muito baixo (<30) para GWR.")
+}
+print(paste("Número de observações válidas para análise GWR:", nrow(h3_data)))
+# Verifica se o número de observações válidas após a limpeza é suficiente para realizar a análise GWR.
+# GWR requer um número mínimo de observações para produzir resultados confiáveis.
+# Se o número de observações for muito baixo, o script é interrompido com uma mensagem de erro.
+
+# Transformação Logarítmica.
+# A transformação logarítmica `log1p` (log(x+1)) ajuda a normalizar distribuições de contagem
+# e lida com valores zero, que são comuns em dados de criminalidade.
+h3_data <- h3_data %>%
+  mutate(
+    log_roubos = log1p(contagem_roubos),
+    log_drogas = log1p(contagem_drogas)
+  )
+# Aplica uma transformação logarítmica (usando `log1p`, que é `log(x + 1)`) às colunas de contagem de roubos e drogas.
+# A transformação logarítmica é frequentemente usada para normalizar distribuições de contagem,
+# que tendem a ser assimétricas e com muitos valores zero. Adicionar 1 antes de aplicar o logaritmo
+# garante que os valores zero sejam tratados corretamente (log(0 + 1) = log(1) = 0).
+
+print(paste("NAs em log_roubos pós-transformação:", sum(is.na(h3_data$log_roubos))))
+print(paste("NAs em log_drogas pós-transformação:", sum(is.na(h3_data$log_drogas))))
+
+# --------------------------------------------------------------------------
+# ETAPA 2: ANÁLISE EXPLORATÓRIA ESPACIAL INICIAL E MODELO OLS GLOBAL
+# --------------------------------------------------------------------------
+print("--- ETAPA 2: ANÁLISE EXPLORATÓRIA E OLS ---")
+# Visualizar a distribuição espacial das variáveis transformadas.
+# Atualizando a sintaxe do tmap para v4.
+map_log_roubos <- tm_shape(h3_data) +
+    tm_polygons("log_roubos",
+                palette = "Reds", style = "quantile", n = 7,
+                title = "Log(Roubos + 1)",
+                border.col = "grey80", border.alpha = 0.3,
+                legend.hist = TRUE) +
+    tm_layout(title = "Distribuição de Roubos (Log)") +
+    tm_legend(legend.outside = TRUE)
+# Cria um mapa temático da distribuição espacial da variável `log_roubos` usando o pacote `tmap`.
+# `tm_shape` especifica o objeto espacial a ser mapeado.
+# `tm_polygons` define que os polígonos (hexágonos) serão coloridos de acordo com os valores de `log_roubos`.
+# `palette` define a paleta de cores a ser usada (vermelhos).
+# `style = "quantile"` divide os valores em quantis para colorir os polígonos.
+# `n = 7` especifica o número de classes de quantis.
+# `title` define o título da legenda.
+
+map_log_drogas <- tm_shape(h3_data) +
+    tm_polygons("log_drogas",
+                palette = "Blues", style = "quantile", n = 7,
+                title = "Log(Drogas + 1)",
+                border.col = "grey80", border.alpha = 0.3,
+                legend.hist = TRUE) +
+    tm_layout(title = "Distribuição de Drogas (Log)") +
+    tm_legend(legend.outside = TRUE)
+# Cria um mapa temático da distribuição espacial da variável `log_drogas` usando o pacote `tmap`.
+# Os parâmetros são semelhantes aos do mapa de roubos, mas com uma paleta de cores diferente (azuis).
+
+print(map_log_roubos)
+print(map_log_drogas)
+
+# Converter para objeto Spatial* para spdep e GWmodel.
+if(!inherits(h3_data, "sf")){ h3_data <- st_as_sf(h3_data) }
+h3_data_sp <- as(h3_data, "Spatial")
+# Converte o objeto `sf` para um objeto `Spatial*` (SpatialPolygonsDataFrame) para compatibilidade com os pacotes `spdep` e `GWmodel`.
+# Esses pacotes foram originalmente desenvolvidos para trabalhar com objetos `Spatial*`.
+# Primeiro, garante que `h3_data` é um objeto `sf`; se não for, ele é convertido.
+# Em seguida, o objeto `sf` é convertido para um objeto `Spatial*` usando a função `as()`.
+
+# Modelo OLS Global como linha de base.
+formula_model <- log_roubos ~ log_drogas # Y ~ X
+print("--- Sumário do Modelo OLS Global ---")
+ols_model <- NULL
+if (nrow(h3_data_sp) > 0) {
+    ols_model <- lm(formula_model, data = as.data.frame(h3_data_sp))
+    print(summary(ols_model))
+    if (nrow(h3_data_sp) == length(residuals(ols_model))) {
+        h3_data_sp$ols_residuals <- residuals(ols_model)
+        h3_data$ols_residuals <- residuals(ols_model) # Adicionar também ao objeto sf
+    } else {
+        warning("Número de resíduos OLS não corresponde. Pulando adição de resíduos.")
+        h3_data_sp$ols_residuals <- NA; h3_data$ols_residuals <- NA
+    }
+} else {
+    print("h3_data_sp está vazio. Não é possível rodar OLS.")
+    h3_data_sp$ols_residuals <- NA; h3_data$ols_residuals <- NA
+}
+# Ajusta um modelo de regressão linear global (OLS) usando a função `lm()`.
+# O modelo OLS é usado como uma linha de base para comparar com os resultados do modelo GWR.
+# A fórmula `log_roubos ~ log_drogas` especifica que `log_roubos` é a variável dependente (Y)
+# e `log_drogas` é a variável independente (X).
+# O `summary()` da o modelo OLS fornece informações sobre os coeficientes, o R², os valores p, etc.
+# Os resíduos do modelo OLS são calculados usando a função `residuals()` e adicionados ao objeto `h3_data_sp`.
+
+# Mapa dos resíduos do OLS.
+if (!all(is.na(h3_data$ols_residuals))) {
+    map_ols_residuals <- tm_shape(h3_data) +
+      tm_polygons("ols_residuals", title = "Resíduos OLS",
+                  palette = "RdBu", style = "jenks", midpoint = 0, # midpoint para paletas divergentes
+                  border.col = "grey80", border.alpha = 0.3) +
+      tm_layout(title = "Resíduos do Modelo OLS Global") +
+      tm_legend(legend.outside = TRUE)
+    print(map_ols_residuals)
+}
+# Cria um mapa temático dos resíduos do modelo OLS usando o pacote `tmap`.
+# Os resíduos representam a diferença entre os valores observados e os valores previstos pelo modelo OLS.
+# Mapear os resíduos pode ajudar a identificar padrões espaciais nos erros do modelo,
+# o que pode indicar que o modelo OLS não é adequado para os dados.
+# A paleta de cores "RdBu" (vermelho-azul) é usada para representar os resíduos,
+# com cores vermelhas indicando resíduos positivos (o modelo subestima os valores)
+# e cores azuis indicando resíduos negativos (o modelo superestima os valores).
+# `midpoint = 0` centraliza a escala de cores em zero.
+
+# Teste de Autocorrelação Espacial Global (I de Moran) nos resíduos do OLS.
+# Primeiro, validar geometrias para o cálculo da vizinhança.
+h3_data_valid <- h3_data
+listw_ols_valid <- NULL
+if (nrow(h3_data_valid) > 0 && !all(is.na(h3_data_valid$ols_residuals))) {
+    if(!all(st_is_valid(h3_data_valid))){
+        print("Atenção: Geometrias inválidas encontradas. Tentando corrigir com st_make_valid().")
+        h3_data_valid_temp <- st_make_valid(h3_data_valid)
+        if(nrow(h3_data_valid_temp) != nrow(h3_data_valid)) {
+            warning("st_make_valid alterou o número de linhas. O teste de Moran pode ser afetado.")
+            # Idealmente, aqui você re-alinharia os resíduos com as novas geometrias/linhas.
+            # Para simplificar, prosseguimos, mas isso é um ponto de atenção.
+            # Uma forma seria um join pelo ID se os IDs foram mantidos por st_make_valid.
+            # Se os IDs não foram mantidos, a correspondência entre resíduos e geometrias pode ser perdida.
+        }
+        h3_data_valid <- h3_data_valid_temp # Usar a versão corrigida
+        if(!all(st_is_valid(h3_data_valid))) print("Ainda existem geometrias inválidas após st_make_valid.")
+    }
+
+    if (nrow(h3_data_valid) > 0) { # Checar novamente após st_make_valid
+        h3_data_sp_valid <- as(h3_data_valid, "Spatial")
+
+        # Definir vizinhança (KNN com k=6 como exemplo)
+        # O aviso "identical points found" pode ocorrer se centróides de hexágonos caírem no mesmo lugar.
+        # O aviso "sub-graphs" indica que o conjunto de dados não é totalmente conectado.
+        coords_valid <- st_coordinates(st_centroid(h3_data_valid)) # st_centroid pode dar aviso sobre atributos
+        
+        # Lidar com coordenadas duplicadas para knearneigh
+        unique_coords_df <- as.data.frame(coords_valid) %>% distinct(X, Y, .keep_all = TRUE)
+        original_indices_of_unique <- as.numeric(rownames(unique_coords_df)) # Índices das linhas originais que são únicas
+        
+        coords_for_knn <- as.matrix(unique_coords_df) # Apenas coordenadas X, Y
+        
+        if (nrow(coords_for_knn) > 1) { # Precisa de mais de um ponto para vizinhos
+            k_neighbors <- min(6, nrow(coords_for_knn) - 1)
+            if (k_neighbors > 0) {
+                nb_knn_valid <- knearneigh(coords_for_knn, k = k_neighbors)
+                nb_obj_valid <- knn2nb(nb_knn_valid)
+                
+                # Mapear os resíduos para as coordenadas únicas
+                ols_residuals_for_moran <- h3_data_valid$ols_residuals[original_indices_of_unique]
+                ols_residuals_for_moran <- ols_residuals_for_moran[!is.na(ols_residuals_for_moran)]
+
+                if(length(nb_obj_valid) == length(ols_residuals_for_moran) && length(ols_residuals_for_moran) > 0) {
+                    listw_ols_valid <- nb2listw(nb_obj_valid, style = "W", zero.policy = TRUE)
+                    print("--- Teste I de Moran nos Resíduos do OLS ---")
+                    moran_test_ols_residuals <- moran.test(ols_residuals_for_moran, listw_ols_valid, zero.policy = TRUE, na.action=na.omit)
+                    print(moran_test_ols_residuals)
+                } else {
+                    print("Não foi possível realizar teste de Moran nos resíduos OLS (incompatibilidade de tamanho após tratar coordenadas únicas).")
+                }
+            } else {
+                print("Não há vizinhos suficientes para o teste de Moran após tratar coordenadas únicas.")
+            }
+        } else {
+            print("Não há coordenadas únicas suficientes para definir vizinhança.")
+        }
+    }
+} else {
+    print("Não foi possível calcular o teste de Moran nos resíduos OLS (dados insuficientes ou NAs).")
+}
+# Realiza o teste de autocorrelação espacial global (I de Moran) nos resíduos do modelo OLS.
+# O teste de Moran verifica se os resíduos do modelo OLS estão espacialmente autocorrelacionados.
+# Se os resíduos estiverem espacialmente autocorrelacionados, isso indica que o modelo OLS não está capturando
+# toda a estrutura espacial nos dados e que um modelo espacialmente explícito, como o GWR, pode ser mais apropriado.
+# Primeiro, as geometrias são validadas usando `st_is_valid()` e corrigidas usando `st_make_valid()` se necessário.
+# Em seguida, um objeto de vizinhança é criado usando `knearneigh()` e `knn2nb()`.
+# `knearneigh()` identifica os k vizinhos mais próximos para cada hexágono.
+# `knn2nb()` converte os resultados de `knearneigh()` em um objeto de vizinhança (`nb`).
+# Um objeto de lista de pesos espaciais (`listw`) é criado a partir do objeto de vizinhança usando `nb2listw()`.
+# O teste de Moran é realizado usando a função `moran.test()`.
+# O resultado do teste de Moran fornece o índice de Moran, o valor p e outras estatísticas.
+# Um valor p baixo indica que os resíduos estão espacialmente autocorrelacionados.
+```
+
+```{r}
+
+
+# --------------------------------------------------------------------------
+# ETAPA 3: SELEÇÃO DA LARGURA DE BANDA (BANDWIDTH) PARA GWR
+# --------------------------------------------------------------------------
+print("--- ETAPA 3: SELEÇÃO DE LARGURA DE BANDA GWR ---")
+
+# Inicializar a variável para a largura de banda
+bw_gwr_adaptive <- NULL
+
+# Verificar se os dados necessários para bw.gwr existem e são válidos
+if (exists("h3_data_sp_valid") && inherits(h3_data_sp_valid, "Spatial") && nrow(h3_data_sp_valid) > 10 &&
+    !is.null(formula_model) &&
+    # Verificar se as variáveis da fórmula existem como colunas e não têm apenas NAs
+    all(all.vars(formula_model) %in% names(h3_data_sp_valid@data)) &&
+    sum(complete.cases(h3_data_sp_valid@data[, all.vars(formula_model)])) > 10) {
+
+    print("Selecionando Largura de Banda para GWR (pode levar tempo)...")
+    # A função bw.gwr determina a largura de banda ótima para o modelo GWR.
+    # 'approach = "CV"' usa Validação Cruzada (Cross-Validation) para encontrar a largura de banda.
+    #   A Validação Cruzada (CV) testa diferentes larguras de banda e escolhe aquela que minimiza o erro de predição.
+    # 'kernel = "gaussian"' especifica o tipo de função kernel a ser usada.
+    #   O kernel Gaussian dá mais peso a observações mais próximas e menos peso a observações mais distantes.
+    #   Outras opções incluem "bisquare", "exponential", "tricube". A escolha do kernel pode afetar os resultados,
+    #   mas geralmente o Gaussian e o Bisquare são boas opções padrão.
+    # 'adaptive = TRUE' significa que a largura de banda será um número de vizinhos,
+    # adaptando-se à densidade dos pontos/polígonos.
+    #   Em áreas densas, a largura de banda será menor (menos vizinhos), e em áreas esparsas, será maior (mais vizinhos).
+    #   Se adaptive = FALSE, a largura de banda será uma distância fixa (em unidades do sistema de coordenadas).
+    bw_gwr_adaptive <- tryCatch({
+        GWmodel::bw.gwr(formula = formula_model,
+                        data = h3_data_sp_valid,
+                        approach = "CV",
+                        kernel = "gaussian",
+                        adaptive = TRUE) # Argumento 'verbose' não é válido para esta função
+    }, error = function(e) {
+        # Captura e imprime qualquer erro que ocorra durante a seleção da largura de banda.
+        print(paste("Erro na seleção de Largura de Banda (bw.gwr):", e$message))
+        return(NULL) # Retorna NULL se houver erro
+    })
+
+    if (!is.null(bw_gwr_adaptive)) {
+        print(paste("Largura de Banda Adaptativa Selecionada (N vizinhos):", bw_gwr_adaptive))
+        # A largura de banda ideal (bw_gwr_adaptive) representa o número de vizinhos a serem incluídos
+        # em cada regressão local. Um valor menor implica maior variabilidade nos coeficientes locais,
+        # enquanto um valor maior suaviza os coeficientes, aproximando-se de um modelo global.
+    } else {
+        print("Falha ao selecionar a largura de banda para GWR. Verifique os dados de entrada e os avisos.")
+        # Possíveis causas para a falha:
+        # - Dados de entrada inválidos (NAs, infinitos, etc.)
+        # - Problemas de multicolinearidade
+        # - Pouca variabilidade nas variáveis
+    }
+} else {
+    print("Dados insuficientes ou inválidos para seleção de largura de banda GWR.")
+    print("Verifique se 'h3_data_sp_valid' existe, é um objeto Spatial, tem mais de 10 linhas,")
+    print("e se as variáveis na 'formula_model' existem em h3_data_sp_valid@data e têm dados válidos.")
+}
+
+# --------------------------------------------------------------------------
+# ETAPA 4: AJUSTE DO MODELO GWR
+# --------------------------------------------------------------------------
+print("--- ETAPA 4: AJUSTE DO MODELO GWR ---")
+
+# Inicializar a variável para o modelo GWR
+gwr_model <- NULL
+
+# Verificar se a largura de banda foi selecionada e se os dados são válidos
+if (!is.null(bw_gwr_adaptive) && exists("h3_data_sp_valid") && inherits(h3_data_sp_valid, "Spatial")) {
+
+    print("Ajustando Modelo GWR...")
+    # A função gwr.basic ajusta o modelo GWR usando a largura de banda selecionada.
+    # 'cv = TRUE' calcula estatísticas de validação cruzada.
+    #   Isso permite obter uma estimativa do R² fora da amostra (quasi-global R2).
+    #   Útil para avaliar o poder preditivo do modelo em dados não utilizados no ajuste.
+    # 'F123.test = TRUE' realiza testes para avaliar a não-estacionariedade dos coeficientes.
+    #   Testes F para verificar se os coeficientes variam significativamente no espaço.
+    #   Se os testes forem significativos, isso fornece evidências de que o GWR é apropriado.
+    gwr_model <- tryCatch({
+        GWmodel::gwr.basic(formula = formula_model,
+                           data = h3_data_sp_valid,
+                           bw = bw_gwr_adaptive, # Largura de banda calculada na Etapa 3
+                           kernel = "gaussian",
+                           adaptive = TRUE,
+                           cv = TRUE,         # Para obter o R2 de validação cruzada no sumário
+                           F123.test = TRUE) # Para testes de não estacionariedade (se aplicável)
+    }, error = function(e) {
+        # Captura e imprime qualquer erro que ocorra durante o ajuste do modelo GWR.
+        print(paste("Erro no ajuste do Modelo GWR (gwr.basic):", e$message))
+        return(NULL) # Retorna NULL se houver erro
+    })
+
+    if (!is.null(gwr_model)) {
+        print("--- Sumário do Modelo GWR ---")
+        print(gwr_model)
+        # O sumário do gwr_model inclui:
+        # - AIC, AICc: Critérios de informação para comparação de modelos.
+        #   Valores menores indicam um melhor ajuste, penalizando a complexidade do modelo.
+        # - R² global e R² ajustado global.
+        #   O R² global indica a proporção da variância explicada pelo modelo GWR.
+        #   O R² ajustado leva em conta o número de parâmetros no modelo.
+        # - Resultados do teste F para não-estacionariedade dos coeficientes.
+        # - Quasi-global R2 (se cv=TRUE).
+        #   Estimativa do R² fora da amostra, obtida por validação cruzada.
+        #   Geralmente, é menor que o R² global, mas fornece uma avaliação mais realista
+        #   do poder preditivo do modelo.
+    } else {
+        print("Falha ao ajustar o modelo GWR. Verifique a largura de banda e os dados de entrada.")
+        # Possíveis causas para a falha:
+        # - Largura de banda inadequada
+        # - Problemas de multicolinearidade
+        # - Dados de entrada inválidos
+    }
+} else {
+    if (is.null(bw_gwr_adaptive)) {
+        print("Largura de banda GWR não foi selecionada. Não é possível ajustar o modelo GWR.")
+    } else {
+        print("Dados 'h3_data_sp_valid' não estão disponíveis ou não são válidos. Não é possível ajustar o modelo GWR.")
+    }
+}
+
+# --------------------------------------------------------------------------
+# ETAPA 5: ANÁLISE E INTERPRETAÇÃO DOS RESULTADOS LOCAIS DO GWR
+# --------------------------------------------------------------------------
+print("--- ETAPA 5: ANÁLISE DOS RESULTADOS LOCAIS DO GWR ---")
+
+# Verificar se o modelo GWR foi ajustado e se o objeto sf 'h3_data_valid' existe
+if (!is.null(gwr_model) && exists("h3_data_valid") && inherits(h3_data_valid, "sf")) {
+
+    # O resultado gwr_model$SDF é um SpatialDataFrame (SpatialPolygonsDataFrame ou SpatialPointsDataFrame)
+    # contendo os resultados locais (coeficientes, t-valores, R² local, etc.)
+    # para cada ponto de regressão (geralmente os centróides dos polígonos de entrada).
+    gwr_results_spatial_df <- gwr_model$SDF
+
+    # Adicionar os resultados locais do GWR de volta ao objeto sf original ('h3_data_valid').
+    # ASSUMIMOS que a ordem das linhas em 'h3_data_valid' (que foi usada para criar 'h3_data_sp_valid')
+    # corresponde à ordem das feições/pontos de regressão em 'gwr_results_spatial_df'.
+    # Esta é uma suposição comum, mas pode falhar se houver manipulações que alterem a ordem.
+    # É CRUCIAL garantir que a ordem das linhas seja consistente entre os dois objetos.
+    # Caso contrário, os resultados locais serão atribuídos incorretamente aos polígonos.
+    if (nrow(h3_data_valid) == nrow(gwr_results_spatial_df)) {
+        print("Adicionando resultados locais do GWR ao dataframe sf 'h3_data_valid'...")
+
+        # Extrair os nomes das variáveis independentes da fórmula para facilitar a renomeação
+        independent_vars <- all.vars(formula_model)[-1] # Remove a variável dependente
+
+        # Criar o dataframe final com os resultados do GWR
+        h3_data_gwr_results <- h3_data_valid %>%
+            mutate(
+                # Coeficientes locais
+                coef_intercepto_gwr = gwr_results_spatial_df$Intercept,
+                # Adicionar dinamicamente os coeficientes das variáveis independentes
+                # Para cada var_independente, cria coef_var_independente_gwr e t_var_independente_gwr
+                # Exemplo: coef_log_drogas_gwr, t_log_drogas_gwr
+                # Esta parte pode precisar de ajuste se os nomes no SDF forem diferentes (ex: com sufixo .1)
+            )
+
+        # Adicionar coeficientes e t-valores para cada variável independente
+        for (var_name in independent_vars) {
+            coef_col_name_sdf <- var_name # Nome da coluna do coeficiente no SDF (ex: "log_drogas")
+            t_val_col_name_sdf <- paste0(var_name, "_TV") # Nome da coluna do t-valor no SDF (ex: "log_drogas_TV")
+
+            # Verificar se as colunas existem no SDF do GWR
+            if (coef_col_name_sdf %in% names(gwr_results_spatial_df) && t_val_col_name_sdf %in% names(gwr_results_spatial_df)) {
+                h3_data_gwr_results <- h3_data_gwr_results %>%
+                    mutate(
+                        !!paste0("coef_", var_name, "_gwr") := gwr_results_spatial_df[[coef_col_name_sdf]],
+                        !!paste0("t_", var_name, "_gwr") := gwr_results_spatial_df[[t_val_col_name_sdf]]
+                    )
+            } else {
+                warning(paste0("Colunas de coeficiente ('", coef_col_name_sdf, "') ou t-valor ('", t_val_col_name_sdf, "') para '", var_name, "' não encontradas no SDF do GWR."))
+                # Se as colunas não forem encontradas, pode ser devido a:
+                # - Nomes de colunas diferentes no SDF
+                # - Erro na especificação da fórmula
+                # - Problemas com os dados
+            }
+        }
+
+        # Adicionar outros resultados locais do GWR
+        h3_data_gwr_results <- h3_data_gwr_results %>%
+            mutate(
+                gwr_y_observado = gwr_results_spatial_df$y,             # Valor observado da variável dependente
+                gwr_y_predito = gwr_results_spatial_df$yhat,           # Valor predito da variável dependente
+                gwr_residuos_locais = gwr_results_spatial_df$residual, # Resíduos locais
+                gwr_LocalR2 = gwr_results_spatial_df$Local_R2          # R² Local
+            )
+        print("Resultados locais do GWR adicionados com sucesso.")
+        print("Nomes das colunas em 'h3_data_gwr_results':"); print(names(h3_data_gwr_results))
+        # Verifique os nomes das colunas para garantir que os resultados foram adicionados corretamente.
+
+    } else {
+        warning("O número de linhas em 'h3_data_valid' e nos resultados do GWR (SDF) não coincide. Não foi possível adicionar os resultados locais do GWR. Verifique os dados.")
+        h3_data_gwr_results <- h3_data_valid # Prossegue sem os resultados do GWR para evitar mais erros
+        # Se o número de linhas não coincidir, isso indica um problema grave com a ordem dos dados.
+        # É essencial investigar e corrigir isso antes de prosseguir com a análise.
+    }
+
+    # --- MAPAS DOS RESULTADOS LOCAIS DO GWR ---
+    # Atualizando a sintaxe do tmap para v4.
+
+    # (A) Mapa dos Coeficientes Locais da variável 'log_drogas'
+    # Este mapa mostra como o efeito da variável 'log_drogas' sobre 'log_roubos' varia espacialmente.
+    # Áreas com coeficientes altos indicam uma forte associação positiva, enquanto áreas com coeficientes baixos
+    # (ou negativos) indicam uma associação fraca (ou negativa).
+    # A interpretação dos coeficientes locais depende da escala das variáveis.
+    # Se as variáveis estiverem em escala logarítmica, os coeficientes representam elasticidades.
+    if ("coef_log_drogas_gwr" %in% names(h3_data_gwr_results)) {
+        map_coef_log_drogas <- tm_shape(h3_data_gwr_results) +
+            tm_polygons("coef_log_drogas_gwr",
+                        title = "Coef. Local GWR: Log(Drogas)",
+                        palette = "RdBu", style = "jenks", n = 7, midpoint = 0,
+                        border.col = "grey80", border.alpha = 0.3,
+                        legend.hist = TRUE) +
+            tm_layout(title = "GWR: Coeficientes Locais de Log(Drogas)") +
+            tm_legend(legend.outside = TRUE, legend.title.size = 0.8, legend.text.size = 0.7)
+        print(map_coef_log_drogas)
+        # A paleta "RdBu" é usada para representar valores positivos e negativos.
+        # O estilo "jenks" divide os dados em classes com base em quebras de Jenks,
+        # que minimizam a variância dentro das classes e maximizam a variância entre as classes.
+    } else {
+        print("Coluna 'coef_log_drogas_gwr' não encontrada para mapeamento.")
+    }
+
+    # (B) Mapa da Significância dos Coeficientes Locais de 'log_drogas'
+    # Este mapa mostra onde os coeficientes locais são estatisticamente significativos.
+    # Geralmente, t-valores absolutos > 1.96 (para p < 0.05) ou > 2.58 (para p < 0.01) são considerados significativos.
+    # A significância estatística indica que o efeito da variável é diferente de zero
+    # com um certo nível de confiança.
+    if ("t_log_drogas_gwr" %in% names(h3_data_gwr_results)) {
+        h3_data_gwr_results <- h3_data_gwr_results %>%
+            mutate(signif_coef_drogas_gwr = case_when(
+                abs(t_log_drogas_gwr) >= 2.58 ~ "Significativo (p < 0.01)",
+                abs(t_log_drogas_gwr) >= 1.96 ~ "Significativo (p < 0.05)",
+                TRUE ~ "Não Significativo (p >= 0.05)"
+            ),
+            # Assegurar que a coluna seja um fator com níveis ordenados para a legenda
+            signif_coef_drogas_gwr = factor(signif_coef_drogas_gwr,
+                                            levels = c("Não Significativo (p >= 0.05)", "Significativo (p < 0.05)", "Significativo (p < 0.01)"),
+                                            ordered = TRUE)
+            )
+
+        map_signif_drogas <- tm_shape(h3_data_gwr_results) +
+            tm_polygons("signif_coef_drogas_gwr",
+                        title = "Significância Coef. GWR: Log(Drogas)",
+                        palette = c("grey80", "lightcoral", "firebrick"), # Ajuste as cores
+                        border.col = "grey70", border.alpha = 0.3) +
+            tm_layout(title = "GWR: Significância dos Coeficientes Locais de Log(Drogas)") +
+            tm_legend(legend.outside = TRUE, legend.title.size = 0.8, legend.text.size = 0.7)
+        print(map_signif_drogas)
+        # A paleta de cores representa os diferentes níveis de significância.
+        # É importante escolher cores que sejam facilmente distinguíveis.
+    } else {
+        print("Coluna 't_log_drogas_gwr' não encontrada para mapear significância.")
+    }
+
+    # (C) Mapa do R² Local
+    # O R² Local indica o quão bem o modelo GWR se ajusta aos dados em cada localidade.
+    # Valores mais altos indicam um melhor ajuste.
+    # O R² Local varia entre 0 e 1, onde 1 indica um ajuste perfeito.
+    if ("gwr_LocalR2" %in% names(h3_data_gwr_results)) {
+        map_local_r2 <- tm_shape(h3_data_gwr_results) +
+            tm_polygons("gwr_LocalR2",
+                        title = "R² Local GWR",
+                        palette = "Greens", style = "quantile", n = 7,
+                        border.col = "grey80", border.alpha = 0.3,
+                        legend.hist = TRUE) +
+            tm_layout(title = "GWR: R² Local (Poder Explicativo Local)") +
+            tm_legend(legend.outside = TRUE, legend.title.size = 0.8, legend.text.size = 0.7)
+        print(map_local_r2)
+        # O estilo "quantile" divide os dados em classes de igual frequência.
+        # Isso garante que cada classe tenha o mesmo número de observações.
+    } else {
+        print("Coluna 'gwr_LocalR2' não encontrada para mapeamento.")
+    }
+
+    # (D) Mapa dos Resíduos Locais do GWR
+    # Mapear os resíduos do GWR pode ajudar a identificar áreas onde o modelo
+    # consistentemente superestima ou subestima a variável dependente.
+    # Idealmente, os resíduos devem ser aleatoriamente distribuídos.
+    # Padrões nos resíduos podem indicar que o modelo não está capturando
+    # toda a complexidade espacial dos dados.
+    if ("gwr_residuos_locais" %in% names(h3_data_gwr_results)) {
+        map_gwr_residuals <- tm_shape(h3_data_gwr_results) +
+            tm_polygons("gwr_residuos_locais",
+                        title = "Resíduos Locais GWR",
+                        palette = "RdBu", style = "jenks", n = 7, midpoint = 0,
+                        border.col = "grey80", border.alpha = 0.3) +
+            tm_layout(title = "GWR: Mapa dos Resíduos Locais") +
+            tm_legend(legend.outside = TRUE, legend.title.size = 0.8, legend.text.size = 0.7)
+        print(map_gwr_residuals)
+        # Resíduos positivos indicam que o modelo subestima a variável dependente.
+        # Resíduos negativos indicam que o modelo superestima a variável dependente.
+
+        # (E) Teste de Autocorrelação Espacial nos Resíduos do GWR
+        # Se listw_ols_valid foi criado e é apropriado (mesma estrutura de vizinhança)
+        if (!is.null(listw_ols_valid) && exists("h3_data_gwr_results") &&
+            length(h3_data_gwr_results$gwr_residuos_locais[!is.na(h3_data_gwr_results$gwr_residuos_locais)]) == length(listw_ols_valid$neighbours)) {
+            # A condição de comprimento acima é uma verificação simplificada.
+            # O ideal é que 'listw_ols_valid' tenha sido criado com base nas mesmas geometrias/ordem
+            # que agora estão em 'h3_data_gwr_results'.
+            print("--- Teste I de Moran nos Resíduos do GWR ---")
+            moran_test_gwr_residuals <- moran.test(h3_data_gwr_results$gwr_residuos_locais,
+                                                   listw_ols_valid, # Usar a mesma matriz de pesos se aplicável
+                                                   zero.policy = TRUE,
+                                                   na.action = na.omit) # Omitir NAs nos resíduos
+            print(moran_test_gwr_residuals)
+            # Se o I de Moran ainda for significativo, pode indicar que o GWR não capturou
+            # toda a estrutura espacial, ou que a largura de banda não é ideal, ou variáveis omitidas.
+            # Um I de Moran significativo nos resíduos indica que os resíduos não são aleatórios
+            # e que há autocorrelação espacial. Isso sugere que o modelo pode ser melhorado
+            # incluindo variáveis adicionais ou ajustando a largura de banda.
+        } else {
+            if (is.null(listw_ols_valid)) print("Matriz de pesos 'listw_ols_valid' não está disponível para teste de Moran nos resíduos GWR.")
+            else print("Incompatibilidade no número de resíduos GWR e a estrutura de vizinhança para o teste de Moran.")
+        }
+    } else {
+        print("Coluna 'gwr_residuos_locais' não encontrada para mapeamento ou teste de Moran.")
+    }
+
+    # (F) Comparação Gráfica: Valores Observados vs. Ajustados (Previstos) pelo GWR
+    # Este gráfico de dispersão ajuda a avaliar o quão bem os valores preditos pelo GWR
+    # correspondem aos valores observados da variável dependente.
+    # Se os pontos estiverem próximos da linha de 45 graus, isso indica um bom ajuste.
+    if ("gwr_y_observado" %in% names(h3_data_gwr_results) && "gwr_y_predito" %in% names(h3_data_gwr_results)) {
+        scatter_gwr_fit <- ggplot(data = h3_data_gwr_results, aes(x = gwr_y_observado, y = gwr_y_predito)) +
+            geom_point(alpha = 0.6, color = "steelblue") +
+            geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", size = 1) +
+            labs(
+                title = "GWR: Valores Observados vs. Ajustados (Log-escala)",
+                x = "Log(Roubos + 1) Observados",
+                y = "Log(Roubos + 1) Ajustados pelo GWR"
+            ) +
+            theme_minimal(base_size = 12) +
+            coord_fixed() # Para eixos x e y terem a mesma escala
+        print(scatter_gwr_fit)
+        # A linha de 45 graus representa o ajuste perfeito.
+        # A distância dos pontos à linha indica o erro de predição.
+    } else {
+        print("Colunas 'gwr_y_observado' ou 'gwr_y_predito' não encontradas para o gráfico de dispersão.")
+    }
+
+} else {
+    if (is.null(gwr_model)) {
+        print("Modelo GWR não foi ajustado com sucesso. Não é possível analisar resultados locais.")
+    } else {
+        print("Objeto sf 'h3_data_valid' não está disponível. Não é possível analisar resultados locais do GWR.")
+    }
+}
+
+```
+
+
+
+
+```{r}
+# --------------------------------------------------------------------------
+# ETAPA 6: EXTRAIR E APRESENTAR OS COEFICIENTES LOCAIS E SIGNIFICÂNCIA
+# --------------------------------------------------------------------------
+print("--- ETAPA 6: COEFICIENTES LOCAIS ESTIMADOS E SIGNIFICÂNCIA (DROGAS SOBRE ROUBOS) ---")
+
+if (!is.null(gwr_model) && exists("h3_data_gwr_results") &&
+    "coef_log_drogas_gwr" %in% names(h3_data_gwr_results) &&
+    "t_log_drogas_gwr" %in% names(h3_data_gwr_results)) {
+
+    # Selecionar as colunas de interesse para a tabela de resultados
+    # Certifique-se de que 'col_id_roubos_original' (ex: "h3_index") existe em h3_data_gwr_results
+    # Se você criou um 'temp_id_join', use esse nome.
+    id_column_to_print <- col_id_roubos_original # Use o nome final do ID do hexágono de roubo
+
+    if (!(id_column_to_print %in% names(h3_data_gwr_results))) {
+        # Fallback se o ID original não foi carregado corretamente até h3_data_gwr_results
+        # Isso pode acontecer se 'col_id_roubos_original' não foi definido corretamente ou
+        # se a junção dos resultados do GWR não preservou o ID original.
+        # Criar um ID sequencial para a tabela se o ID original estiver ausente.
+        warning(paste("Coluna ID '", id_column_to_print, "' não encontrada em h3_data_gwr_results. Usando um ID sequencial para a tabela.", sep=""))
+        h3_data_gwr_results$tabela_id_seq <- 1:nrow(h3_data_gwr_results)
+        id_column_to_print <- "tabela_id_seq"
+    }
+
+    # Calcular p-valores locais aproximados a partir dos t-valores
+    # Para GWR, os graus de liberdade efetivos locais podem ser complexos.
+    # Uma aproximação comum para amostras maiores é usar a distribuição normal (Z-score).
+    # df_residual <- экологическая_коррекция_степеней_свободы # A função gwr.basic fornece `results$edf` (effective df for residuals)
+    # Poderíamos usar gwr_model$results$edf para os graus de liberdade, mas para simplicidade e robustez
+    # com muitos testes locais, a aproximação pela normal é frequentemente usada.
+    h3_data_gwr_results <- h3_data_gwr_results %>%
+        mutate(
+            p_valor_local_drogas_gwr = 2 * (1 - pnorm(abs(t_log_drogas_gwr))), # P-valor bilateral
+            significativo_p05_drogas_gwr = ifelse(p_valor_local_drogas_gwr < 0.05, "Sim (p<0.05)", "Não (p>=0.05)"),
+            significativo_p01_drogas_gwr = ifelse(p_valor_local_drogas_gwr < 0.01, "Sim (p<0.01)", "Não (p>=0.01)")
+        )
+
+    # Criar um dataframe para impressão
+    tabela_coeficientes_locais <- h3_data_gwr_results %>%
+        as.data.frame() %>% # Converter de sf para dataframe para select e kable
+        select(
+            !!sym(id_column_to_print),
+            Coeficiente_Log_Drogas = coef_log_drogas_gwr,
+            T_Valor_Log_Drogas = t_log_drogas_gwr,
+            P_Valor_Aprox_Log_Drogas = p_valor_local_drogas_gwr,
+            Significativo_P05 = significativo_p05_drogas_gwr,
+            R_Quadrado_Local = gwr_LocalR2 # Adicionando o R² Local
+        ) %>%
+        arrange(desc(abs(Coeficiente_Log_Drogas))) # Opcional: ordenar pelos coeficientes mais fortes
+
+    print("--- Tabela: Coeficientes Locais Estimados para Log(Drogas), Significância e R² Local ---")
+    print(kable(head(tabela_coeficientes_locais, 20), caption = "Top 20 Coeficientes Locais para Log(Drogas) (ordenado por magnitude do coef.)", digits = 4, format = "pipe"))
+    # Para imprimir toda a tabela (pode ser muito longa):
+    # print(kable(tabela_coeficientes_locais, caption = "Coeficientes Locais para Log(Drogas), Significância e R² Local", digits = 4))
+
+    cat("\n--- Interpretação dos Coeficientes e R² Local ---\n")
+    cat("A tabela acima mostra, para cada localidade (identificada por '",id_column_to_print,"'):\n", sep="")
+    cat("1. Coeficiente_Log_Drogas: Este é o parâmetro local estimado. \n")
+    cat("   - Um valor positivo (ex: 0.5) sugere que, naquela localidade, um aumento de 1% em 'contagem_drogas' (log1p) está associado a um aumento de 0.5% em 'contagem_roubos' (log1p).\n")
+    cat("   - Um valor negativo sugere uma associação inversa local.\n")
+    cat("   - A magnitude indica a força da associação local.\n")
+    cat("   - **Exemplo:** Se o coeficiente para um hexágono específico for 0.75, isso indica que um aumento de 1% na contagem de drogas (transformada logarítmica) naquele hexágono está associado a um aumento de 0.75% na contagem de roubos (transformada logarítmica). Inversamente, se o coeficiente for -0.3, um aumento de 1% na contagem de drogas está associado a uma *diminuição* de 0.3% na contagem de roubos.\n")
+    cat("2. T_Valor_Log_Drogas: O t-valor associado. Valores absolutos > ~1.96 são geralmente significativos a p<0.05.\n")
+    cat("   - O t-valor mede a razão entre o coeficiente estimado e seu erro padrão. Quanto maior o t-valor (em valor absoluto), mais forte a evidência de que o coeficiente é diferente de zero.\n")
+    cat("   - **Exemplo:** Um t-valor de 3.0 indica que o coeficiente é três vezes maior que seu erro padrão, sugerindo uma forte significância estatística.\n")
+    cat("3. P_Valor_Aprox_Log_Drogas: O p-valor aproximado. Valores < 0.05 indicam significância estatística.\n")
+    cat("   - O p-valor representa a probabilidade de observar um resultado tão extremo quanto o observado (ou mais extremo) se não houver efeito real. Um p-valor baixo (tipicamente abaixo de 0.05) sugere que o resultado é estatisticamente significativo.\n")
+    cat("   - **Exemplo:** Um p-valor de 0.02 significa que há apenas 2% de chance de observar um coeficiente tão grande (em valor absoluto) se a verdadeira relação entre drogas e roubos naquele local for zero.\n")
+    cat("4. Significativo_P05: Uma indicação clara se o coeficiente é significativo ao nível de 5%.\n")
+    cat("   - Esta coluna simplifica a interpretação, indicando diretamente se o p-valor é menor que 0.05.\n")
+    cat("5. R_Quadrado_Local: Indica a proporção da variância em 'log_roubos' que é explicada pelo modelo GWR (incluindo 'log_drogas' e o intercepto local) naquela localidade específica.\n")
+    cat("   - Um R² Local de 0.60 significa que 60% da variação local em roubos é explicada pelo modelo naquela área.\n")
+    cat("   - **Exemplo:** Um R² Local de 0.80 indica que o modelo GWR explica 80% da variabilidade nos roubos naquele hexágono, sugerindo um bom ajuste do modelo aos dados locais. Por outro lado, um R² Local de 0.20 sugere que o modelo explica apenas 20% da variabilidade, indicando que outros fatores não incluídos no modelo podem ser mais importantes para explicar os roubos naquele local.\n\n")
+    cat("ATENÇÃO: Estes resultados mostram ASSOCIAÇÃO local, não necessariamente CAUSALIDADE. A interpretação deve ser feita com cautela, considerando o contexto e outras possíveis variáveis não incluídas no modelo.\n")
+    cat("O GWR é uma ferramenta exploratória para entender como as relações variam no espaço.\n")
+    cat("   - Lembre-se de que a Regressão Geograficamente Ponderada (GWR) é uma técnica exploratória. Ela identifica padrões espaciais nas relações entre variáveis, mas não prova causalidade. É fundamental considerar outros fatores e conhecimentos contextuais ao interpretar os resultados.\n")
+    cat("   - É importante notar que a significância estatística não implica necessariamente importância prática. Um coeficiente pode ser estatisticamente significativo, mas ter um efeito muito pequeno na prática.\n")
+
+} else {
+    if (is.null(gwr_model)) {
+        print("Modelo GWR não foi ajustado com sucesso. Não é possível imprimir coeficientes locais.")
+    } else {
+        print("Colunas necessárias para os coeficientes locais de 'log_drogas' (ex: 'coef_log_drogas_gwr', 't_log_drogas_gwr') não encontradas em 'h3_data_gwr_results'.")
+        print("Verifique os nomes das colunas em 'h3_data_gwr_results':")
+        if(exists("h3_data_gwr_results")) print(names(h3_data_gwr_results))
+    }
+}
+
+# O restante do script (Mapas, etc.) pode continuar como antes.
+# Os mapas de 'coef_log_drogas_gwr', 'signif_coef_drogas_gwr' e 'gwr_LocalR2'
+# já visualizam essas informações espacialmente.
+```
+
+```{r}
+# (Continuando após a ETAPA 5, onde 'h3_data_gwr_results' foi criado e contém
+# os resultados locais do GWR, incluindo coeficientes, t-valores, R² local, etc.)
+
+# --------------------------------------------------------------------------
+# ETAPA ADICIONAL: SALVAR OS RESULTADOS DO GWR EM UM ARQUIVO SHAPEFILE
+# --------------------------------------------------------------------------
+print("--- ETAPA ADICIONAL: SALVANDO RESULTADOS DO GWR EM SHAPEFILE ---")
+
+# Verificar se o dataframe com os resultados do GWR existe
+if (exists("h3_data_gwr_results") && inherits(h3_data_gwr_results, "sf") && nrow(h3_data_gwr_results) > 0) {
+
+    # Definir o nome do arquivo de saída e o caminho
+    # Crie uma pasta para os resultados, se ainda não existir, ou ajuste o caminho.
+    output_directory <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados_gwr/" # !! AJUSTE ESTE CAMINHO !!
+    output_filename_shp <- "gwr_resultados_roubos_drogas.shp"
+    full_output_path_shp <- file.path(output_directory, output_filename_shp)
+
+    # Criar o diretório de saída se ele não existir
+    if (!dir.exists(output_directory)) {
+        dir.create(output_directory, recursive = TRUE)
+        print(paste("Diretório criado:", output_directory))
+    }
+
+    # Shapefiles têm uma limitação no comprimento dos nomes das colunas (geralmente 10 caracteres).
+    # A função st_write() tentará truncar ou ajustar os nomes automaticamente, mas é bom estar ciente.
+    # Vamos verificar os nomes das colunas e, se necessário, renomear as mais longas ou problemáticas
+    # ANTES de salvar, para ter mais controle.
+
+    data_to_save <- h3_data_gwr_results
+
+    # Exemplo de como renomear colunas para ficarem mais curtas (OPCIONAL, mas recomendado para shapefiles)
+    # Verifique os nomes em 'data_to_save' e ajuste conforme necessário.
+    # Se os nomes já forem curtos o suficiente, você pode pular esta parte.
+    # Exemplo: 'coef_intercepto_gwr' -> 'c_int_gwr'
+    #          'coef_log_drogas_gwr' -> 'c_lgdr_gwr'
+    #          't_log_drogas_gwr' -> 't_lgdr_gwr'
+    #          'gwr_LocalR2' -> 'gwr_LocR2'
+    #          'signif_coef_drogas_gwr' -> 'sig_lgdr'
+    #          'gwr_residuos_locais' -> 'gwr_resloc'
+
+    # Verifique se as colunas que você quer renomear realmente existem
+    current_names <- names(data_to_save)
+    new_names_map <- list(
+        "coef_intercepto_gwr" = "c_int_gwr",
+        "coef_log_drogas_gwr" = "c_lgdr_gwr",
+        "t_intercepto_gwr" = "t_int_gwr",
+        "t_log_drogas_gwr" = "t_lgdr_gwr",
+        "gwr_y_observado" = "gwr_y_obs",
+        "gwr_y_predito" = "gwr_y_pred",
+        "gwr_residuos_locais" = "gwr_resloc",
+        "gwr_LocalR2" = "gwr_LocR2",
+        "bandwidth" = "bw" # Adicionando a largura de banda como exemplo
+        # Adicione mais renomeações aqui se necessário, por exemplo, para as colunas de significância
+        # "signif_coef_drogas_gwr" = "sig_c_lgdr" # Exemplo
+    )
+
+    # Renomear colunas apenas se elas existirem
+    for(old_name in names(new_names_map)){
+        if(old_name %in% current_names){
+            data_to_save <- data_to_save %>%
+                rename(!!sym(new_names_map[[old_name]]) := !!sym(old_name))
+            print(paste("Coluna '", old_name, "' renomeada para '", new_names_map[[old_name]], "' para exportação.", sep=""))
+        }
+    }
+    # Se você criou a coluna 'signif_coef_drogas_gwr' como fator, converta para caracter antes de salvar
+    # para evitar problemas com alguns drivers de shapefile.
+    if ("signif_coef_drogas_gwr" %in% names(data_to_save) && is.factor(data_to_save$signif_coef_drogas_gwr)) {
+        data_to_save$signif_coef_drogas_gwr <- as.character(data_to_save$signif_coef_drogas_gwr)
+        print("Coluna 'signif_coef_drogas_gwr' convertida de fator para caracter para exportação.")
+    }
+    # Similar para outras colunas fator que você possa ter criado
+    # Exemplo com coluna lógica (TRUE/FALSE)
+    if("significant_drogas" %in% names(data_to_save) && is.logical(data_to_save$significant_drogas)){
+       data_to_save$significant_drogas <- ifelse(data_to_save$significant_drogas, "TRUE", "FALSE")
+       print("Coluna 'significant_drogas' convertida de logical para character para exportação.")
+    }
+
+    print(paste("Nomes das colunas finais antes de salvar:", paste(names(data_to_save), collapse=", ")))
+
+    # Salvar o objeto sf como um shapefile
+    tryCatch({
+        sf::st_write(obj = data_to_save,
+                     dsn = full_output_path_shp,
+                     driver = "ESRI Shapefile",
+                     append = FALSE, # TRUE para adicionar a um arquivo existente, FALSE para sobrescrever
+                     delete_layer = TRUE, # Se append=FALSE e o layer já existe, delete_layer=TRUE irá sobrescrevê-lo
+                     quiet = FALSE) # quiet=TRUE para suprimir mensagens
+        print(paste("Resultados do GWR salvos com sucesso em:", full_output_path_shp))
+        print("Lembre-se que shapefiles podem truncar nomes de colunas longos (geralmente para 10 caracteres).")
+    }, error = function(e) {
+        print(paste("Erro ao salvar o shapefile:", e$message))
+        print("Possíveis causas: caminho inválido, permissões de escrita, nomes de coluna muito longos ou com caracteres inválidos, ou o objeto sf não é válido.")
+    })
+
+} else {
+    if (!exists("h3_data_gwr_results")) {
+        print("O objeto 'h3_data_gwr_results' não existe. Não é possível salvar.")
+    } else if (!inherits(h3_data_gwr_results, "sf")) {
+        print("O objeto 'h3_data_gwr_results' não é um objeto sf. Não é possível salvar como shapefile.")
+    } else if (nrow(h3_data_gwr_results) == 0) {
+        print("O objeto 'h3_data_gwr_results' está vazio. Nada para salvar.")
+    }
+}
+
+# (Fim do script ou continuação para outras etapas)
+# print("--- ANÁLISE E SALVAMENTO CONCLUÍDOS ---")
+```
+
