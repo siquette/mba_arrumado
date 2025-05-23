@@ -1,0 +1,473 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# 1. Carregar bibliotecas necessárias
+library(sf)
+library(GWmodel)
+library(dplyr)
+library(ggplot2)
+library(sp)
+
+# --- INÍCIO: Definição dos caminhos dos arquivos ---
+path_roubos <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/roubo.shp"
+path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/drogas.shp"
+path_area_estudo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/centro_expandido/centro_expandido_dissolve.shp"
+# --- FIM: Definição dos caminhos dos arquivos ---
+
+# 2. Ler os arquivos shapefile
+tryCatch({
+  pontos_roubo <- st_read(path_roubos, quiet = TRUE)
+  pontos_drogas <- st_read(path_drogas, quiet = TRUE)
+  area_estudo <- st_read(path_area_estudo, quiet = TRUE)
+}, error = function(e) {
+  stop("Erro ao ler um ou mais arquivos shapefile: ", e$message)
+})
+cat("Arquivos shapefile carregados com sucesso.\n")
+
+# 3. Definir CRS projetado alvo e transformar camadas
+crs_projetado_epsg <- 31983
+crs_projetado_desejado <- st_crs(crs_projetado_epsg)
+cat(paste("CRS projetado desejado para análise: EPSG:", crs_projetado_epsg, "\n", sep=""))
+transformar_crs_se_necessario <- function(sf_object, target_crs_obj, nome_camada) {
+  if (st_crs(sf_object) != target_crs_obj) {
+    cat(paste("Transformando CRS da camada '", nome_camada, "' (EPSG:", st_crs(sf_object)$epsg, ") para EPSG:", st_crs(target_crs_obj)$epsg, "...\n", sep=""))
+    return(st_transform(sf_object, crs = target_crs_obj))
+  } else {
+    cat(paste("CRS da camada '", nome_camada, "' já é o desejado (EPSG:", st_crs(target_crs_obj)$epsg, ").\n", sep=""))
+    return(sf_object)
+  }
+}
+tryCatch({
+  area_estudo <- transformar_crs_se_necessario(area_estudo, crs_projetado_desejado, "area_estudo")
+  pontos_roubo <- transformar_crs_se_necessario(pontos_roubo, crs_projetado_desejado, "pontos_roubo")
+  pontos_drogas <- transformar_crs_se_necessario(pontos_drogas, crs_projetado_desejado, "pontos_drogas")
+}, error = function(e) {
+  stop("Erro durante a transformação de CRS: ", e$message)
+})
+if (st_crs(area_estudo) != crs_projetado_desejado || st_crs(pontos_roubo) != crs_projetado_desejado || st_crs(pontos_drogas) != crs_projetado_desejado) {
+  stop("Falha ao harmonizar CRS para todas as camadas.")
+} else {
+  cat("Todas as camadas foram harmonizadas para o CRS projetado (EPSG:", st_crs(area_estudo)$epsg, ").\n")
+}
+if (st_is_longlat(area_estudo)) {
+    stop("O CRS da área de estudo ainda é geográfico.")
+} else {
+    cat("CRS para criação da grade é projetado (EPSG:", st_crs(area_estudo)$epsg, ").\n")
+}
+
+# 4. Criar uma grade hexagonal de análise sobre a área de estudo
+cell_size_m <- 500 # Diâmetro do hexágono (distância entre centros)
+cat(paste("Criando grade hexagonal de análise com diâmetro de célula de aproximadamente", cell_size_m, "metros...\n"))
+grade_base <- st_make_grid(area_estudo, cellsize = cell_size_m, what = "polygons", square = FALSE)
+grade_sf_obj <- st_sf(id_celula_grade = 1:length(grade_base), geometry = grade_base)
+grade_area_estudo_raw <- st_intersection(grade_sf_obj, st_union(area_estudo)) # Pode ter geometrias inválidas ou vazias
+# Filtrar apenas geometrias válidas e não vazias que realmente intersectam
+grade_area_estudo <- grade_area_estudo_raw[!st_is_empty(grade_area_estudo_raw), ]
+if(nrow(grade_area_estudo) == 0) stop("Nenhuma célula da grade intersecta a área de estudo após a limpeza inicial.")
+grade_area_estudo <- grade_area_estudo[lengths(st_intersects(grade_area_estudo, st_union(area_estudo))) > 0,]
+if(nrow(grade_area_estudo) == 0) stop("Nenhuma célula da grade intersecta a área de estudo após st_intersects.")
+
+cat(paste("Grade hexagonal de análise criada com", nrow(grade_area_estudo), "células dentro da área de estudo.\n"))
+
+
+# 5. Agregar os pontos à grade
+cat("Agregando pontos à grade...\n")
+
+if (!"id_celula_grade" %in% names(grade_area_estudo) || any(duplicated(grade_area_estudo$id_celula_grade)) || any(is.na(grade_area_estudo$id_celula_grade))) {
+    if ("id_celula_grade" %in% names(grade_area_estudo)) {
+        cat("Aviso: Coluna 'id_celula_grade' existente em 'grade_area_estudo' continha duplicatas ou NAs. Recriando.\n")
+    } else {
+        cat("Aviso: Coluna 'id_celula_grade' não encontrada em 'grade_area_estudo'. Criando uma nova.\n")
+    }
+    grade_area_estudo$id_celula_grade <- 1:nrow(grade_area_estudo)
+} else {
+    cat("Coluna 'id_celula_grade' verificada e parece OK em 'grade_area_estudo'.\n")
+}
+
+pontos_roubo_na_grade <- suppressMessages(st_join(pontos_roubo, grade_area_estudo, join = st_intersects))
+contagem_roubos <- pontos_roubo_na_grade %>% st_drop_geometry() %>%
+                     filter(!is.na(id_celula_grade)) %>%
+                     group_by(id_celula_grade) %>% summarise(n_roubos = n(), .groups = 'drop')
+
+pontos_drogas_na_grade <- suppressMessages(st_join(pontos_drogas, grade_area_estudo, join = st_intersects))
+contagem_drogas <- pontos_drogas_na_grade %>% st_drop_geometry() %>%
+                     filter(!is.na(id_celula_grade)) %>%
+                     group_by(id_celula_grade) %>% summarise(n_drogas = n(), .groups = 'drop')
+
+dados_gwr_sf <- grade_area_estudo %>%
+  left_join(contagem_roubos, by = "id_celula_grade") %>%
+  left_join(contagem_drogas, by = "id_celula_grade")
+dados_gwr_sf$n_roubos[is.na(dados_gwr_sf$n_roubos)] <- 0
+dados_gwr_sf$n_drogas[is.na(dados_gwr_sf$n_drogas)] <- 0
+cat("Dados agregados.\n")
+
+# 6. Preparar dados para GWR
+cat("Preparando dados para GWR (SPDF e locais)...\n")
+dados_gwr_sf_validos <- NULL
+dados_spdf_gwr <- NULL
+tryCatch({
+  dados_gwr_sf_validos <- dados_gwr_sf[!st_is_empty(dados_gwr_sf$geometry) & st_is_valid(dados_gwr_sf$geometry), ]
+  if(nrow(dados_gwr_sf_validos) < nrow(dados_gwr_sf)){
+      cat(paste("Aviso:", nrow(dados_gwr_sf) - nrow(dados_gwr_sf_validos), "célula(s) com geometria vazia/inválida removidas.\n"))
+  }
+  if(nrow(dados_gwr_sf_validos) == 0) stop("Nenhuma célula com geometria válida após a agregação.")
+
+  if (!"id_celula_grade" %in% names(dados_gwr_sf_validos)) {
+      dados_gwr_sf_validos$id_celula_grade <- 1:nrow(dados_gwr_sf_validos)
+      cat("Coluna 'id_celula_grade' recriada para 'dados_gwr_sf_validos'.\n")
+  } else if (any(duplicated(dados_gwr_sf_validos$id_celula_grade))) {
+      dados_gwr_sf_validos$id_celula_grade <- 1:nrow(dados_gwr_sf_validos)
+      cat("Coluna 'id_celula_grade' recriada em 'dados_gwr_sf_validos' devido a duplicatas.\n")
+  }
+
+  locais_regressao_sf_centroids <- st_point_on_surface(dados_gwr_sf_validos)
+  coords_locais_regressao <- st_coordinates(locais_regressao_sf_centroids)
+  dados_atributos_para_spdf <- st_drop_geometry(dados_gwr_sf_validos)
+
+  dados_spdf_gwr <- SpatialPointsDataFrame(coords = coords_locais_regressao,
+                                           data = dados_atributos_para_spdf,
+                                           proj4string = CRS(st_crs(dados_gwr_sf_validos)$proj4string))
+
+  cat("Dados SPDF preparados. N Pontos SPDF:", length(dados_spdf_gwr), "\n")
+  cat("Nomes das colunas em dados_spdf_gwr@data:", paste(names(dados_spdf_gwr@data), collapse=", "), "\n")
+}, error = function(e) {
+  stop(paste("Erro ao preparar dados GWR:", e$message))
+})
+
+
+# --- INÍCIO: Inspeção da Esparsidade dos Dados ---
+cat("------------------------------------------------------\n")
+cat("Inspeção da Esparsidade dos Dados para GWR:\n")
+cat("------------------------------------------------------\n")
+if (!is.null(dados_spdf_gwr) && nrow(dados_spdf_gwr@data) > 0) {
+    cat("Resumo de n_roubos:\n")
+    print(summary(dados_spdf_gwr$n_roubos))
+    cat("\nFrequência de n_roubos (0 = Sem ocorrências, >0 = Com ocorrências):\n")
+    print(table(Com_Roubos = dados_spdf_gwr$n_roubos > 0))
+    cat(paste("\nPorcentagem de células SEM roubos:",
+              round(sum(dados_spdf_gwr$n_roubos == 0) / length(dados_spdf_gwr$n_roubos) * 100, 2), "%\n"))
+
+    cat("\nResumo de n_drogas:\n")
+    print(summary(dados_spdf_gwr$n_drogas))
+    cat("\nFrequência de n_drogas (0 = Sem ocorrências, >0 = Com ocorrências):\n")
+    print(table(Com_Drogas = dados_spdf_gwr$n_drogas > 0))
+    cat(paste("\nPorcentagem de células SEM drogas:",
+              round(sum(dados_spdf_gwr$n_drogas == 0) / length(dados_spdf_gwr$n_drogas) * 100, 2), "%\n"))
+
+    cat("\nNúmero de células com n_roubos = 0 E n_drogas = 0:\n")
+    print(sum(dados_spdf_gwr$n_roubos == 0 & dados_spdf_gwr$n_drogas == 0))
+    cat(paste("Porcentagem de células com n_roubos = 0 E n_drogas = 0:",
+              round(sum(dados_spdf_gwr$n_roubos == 0 & dados_spdf_gwr$n_drogas == 0) / length(dados_spdf_gwr$n_roubos) * 100, 2), "%\n"))
+
+    cat("\nTotal de células (pontos de regressão) na análise:", length(dados_spdf_gwr), "\n")
+} else {
+    cat("dados_spdf_gwr está vazio ou nulo. Não é possível inspecionar a esparsidade.\n")
+}
+cat("------------------------------------------------------\n\n")
+# --- FIM: Inspeção da Esparsidade dos Dados ---
+
+
+# 7. Calcular a largura de banda ótima e matriz de distância
+formula_gwr <- n_roubos ~ n_drogas
+if(is.null(dados_spdf_gwr) || length(dados_spdf_gwr) < 30) {
+    stop(paste("Nº baixo de pontos (<30) para GWR ou dados_spdf_gwr é nulo. Atualmente:", ifelse(is.null(dados_spdf_gwr), 0, length(dados_spdf_gwr))))
+}
+
+cat("Calculando a matriz de distâncias (dMat)...\n")
+dMat_calibracao <- NULL
+tryCatch({
+  dMat_calibracao <- gw.dist(dp.locat = coordinates(dados_spdf_gwr),
+                             focus = 0, p = 2, theta = 0, longlat = FALSE)
+  cat("Matriz de distâncias (dMat_calibracao) calculada. Dimensões:", dim(dMat_calibracao)[1], "x", dim(dMat_calibracao)[2], "\n")
+}, error = function(e) {
+    cat("ERRO AO CALCULAR dMat_calibracao:", e$message, "\n"); stop("Falha dMat.")
+})
+
+cat("Calculando a largura de banda adaptativa ótima ...\n")
+bw_adaptativa <- NULL
+error_message_bw <- ""
+kernel_usado_para_bw <- "gaussian" # Default kernel
+
+# Tentativa 1: AICc, gaussian
+cat("Tentativa 1: bw.ggwr com approach = 'AICc', kernel = 'gaussian'...\n")
+tryCatch({
+  bw_adaptativa_temp <- GWmodel::bw.ggwr(formula = formula_gwr,
+                                         data = dados_spdf_gwr,
+                                         dMat = dMat_calibracao,
+                                         approach = "AICc",
+                                         kernel = "gaussian",
+                                         adaptive = TRUE)
+  if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0) {
+      bw_adaptativa <- bw_adaptativa_temp
+      kernel_usado_para_bw <- "gaussian"
+  }
+}, error = function(e) {
+  cat("ERRO (Tentativa 1 - AICc, gaussian):", e$message, "\n")
+  error_message_bw <<- paste0(error_message_bw, "AICc,gaussian: ", e$message, "; ")
+})
+
+# Tentativa 2: CV, gaussian
+if (is.null(bw_adaptativa)) {
+  cat("\nTentativa 2: bw.ggwr com approach = 'CV', kernel = 'gaussian'...\n")
+  tryCatch({
+    bw_adaptativa_temp <- GWmodel::bw.ggwr(formula = formula_gwr,
+                                          data = dados_spdf_gwr,
+                                          dMat = dMat_calibracao,
+                                          approach = "CV",
+                                          kernel = "gaussian",
+                                          adaptive = TRUE)
+    if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0) {
+        bw_adaptativa <- bw_adaptativa_temp
+        kernel_usado_para_bw <- "gaussian"
+    }
+  }, error = function(e) {
+    cat("ERRO (Tentativa 2 - CV, gaussian):", e$message, "\n")
+    error_message_bw <<- paste0(error_message_bw, "CV,gaussian: ", e$message, "; ")
+  })
+}
+
+# Tentativa 3: AICc, bisquare
+if (is.null(bw_adaptativa)) {
+  cat("\nTentativa 3: bw.ggwr com approach = 'AICc', kernel = 'bisquare'...\n")
+  tryCatch({
+    bw_adaptativa_temp <- GWmodel::bw.ggwr(formula = formula_gwr,
+                                          data = dados_spdf_gwr,
+                                          dMat = dMat_calibracao,
+                                          approach = "AICc",
+                                          kernel = "bisquare",
+                                          adaptive = TRUE)
+    if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0) {
+        bw_adaptativa <- bw_adaptativa_temp
+        kernel_usado_para_bw <- "bisquare"
+    }
+  }, error = function(e) {
+    cat("ERRO (Tentativa 3 - AICc, bisquare):", e$message, "\n")
+    error_message_bw <<- paste0(error_message_bw, "AICc,bisquare: ", e$message, "; ")
+  })
+}
+
+# Tentativa 4: CV, bisquare
+if (is.null(bw_adaptativa)) {
+  cat("\nTentativa 4: bw.ggwr com approach = 'CV', kernel = 'bisquare'...\n")
+  tryCatch({
+    bw_adaptativa_temp <- GWmodel::bw.ggwr(formula = formula_gwr,
+                                          data = dados_spdf_gwr,
+                                          dMat = dMat_calibracao,
+                                          approach = "CV",
+                                          kernel = "bisquare",
+                                          adaptive = TRUE)
+    if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0) {
+        bw_adaptativa <- bw_adaptativa_temp
+        kernel_usado_para_bw <- "bisquare"
+    }
+  }, error = function(e) {
+    cat("ERRO (Tentativa 4 - CV, bisquare):", e$message, "\n")
+    error_message_bw <<- paste0(error_message_bw, "CV,bisquare: ", e$message, "; ")
+  })
+}
+
+if (is.null(bw_adaptativa)) {
+  cat("-------------------------------------------------------------------------------------\n")
+  cat("ATENÇÃO: Não foi possível calcular automaticamente a largura de banda ótima (bw_adaptativa).\n")
+  cat("Mensagens de erro acumuladas das tentativas com bw.ggwr:\n", error_message_bw, "\n")
+  cat("Isso geralmente ocorre devido à esparsidade dos dados ou colinearidade local\n")
+  cat("quando a busca por largura de banda tenta valores muito pequenos (poucos vizinhos).\n\n")
+  cat("Próximas Etapas Sugeridas:\n")
+  cat("1. ANALISE O OUTPUT DA 'Inspeção da Esparsidade dos Dados' que foi impresso anteriormente.\n")
+  cat("   Se houver muitas células com zero ocorrências, especialmente para 'n_drogas',\n")
+  cat("   isso é uma causa provável.\n\n")
+  cat("2. TENTAR UMA LARGURA DE BANDA ADAPTATIVA MANUALMENTE MAIOR:\n")
+  cat("   Você pode comentar este bloco de cálculo de 'bw_adaptativa' e definir um valor manualmente,\n")
+  cat("   por exemplo: bw_adaptativa <- 75 (representando o número de vizinhos).\n")
+  cat("   Isso ajudará a diagnosticar se o problema é a busca da largura de banda ou o GWR em si.\n")
+  cat("   Para fazer isso, comente desde 'cat("Calculando a largura de banda adaptativa ótima ...\\n")'\n") # ASPAS CORRIGIDAS
+  cat("   até esta mensagem de erro, e descomente as linhas abaixo para definir manualmente:\n")
+  cat("#   bw_adaptativa <- 75 # Exemplo: defina um valor apropriado e descomente\n")
+  cat("#   kernel_usado_para_bw <- "gaussian" # Defina o kernel para gwr.basic (ex: gaussian ou bisquare)\n")
+  cat("#   cat(paste("Usando largura de banda adaptativa definida manualmente:", bw_adaptativa, "vizinhos e kernel:", kernel_usado_para_bw, "\\n")) # Descomente\n\n") # ASPAS CORRIGIDAS
+  cat("3. AUMENTAR O TAMANHO DA CÉLULA DA GRADE ('cell_size_m'):\n")
+  cat("   No início do script, tente aumentar 'cell_size_m' (ex: para 750 ou 1000).\n")
+  cat("   Isso resultará em menos células, mas cada uma cobrindo uma área maior, o que pode\n")
+  cat("   reduzir a esparsidade e a chance de singularidade.\n")
+  cat("-------------------------------------------------------------------------------------\n")
+  stop("Cálculo automático da largura de banda falhou. Veja as sugestões acima.")
+} else {
+  cat(paste("\nLargura de banda adaptativa ótima calculada com sucesso (número de vizinhos):", round(bw_adaptativa, 0), "usando kernel:", kernel_usado_para_bw, "\n"))
+}
+
+
+```
+
+```{r}
+# (Certifique-se de que bw_adaptativa é 30 e kernel_usado_para_bw é "gaussian" no seu ambiente)
+
+# A mensagem de sucesso do cálculo da largura de banda já deve ter sido impressa.
+# Podemos imprimir novamente para confirmar:
+if (!is.null(bw_adaptativa)) {
+    cat(paste("\nCONFIRMAÇÃO: Usando largura de banda adaptativa:", round(bw_adaptativa, 0), "vizinhos e kernel:", kernel_usado_para_bw, "para GWR.\n"))
+} else {
+    stop("ERRO: bw_adaptativa é NULL antes de iniciar a Etapa 8. Algo deu errado no cálculo da largura de banda.")
+}
+
+# 8. Executar o GWR usando gwr.basic
+cat("Executando GWR (gwr.basic)...\n")
+gwr_resultado_lista <- NULL
+tryCatch({
+  gwr_resultado_lista <- GWmodel::gwr.basic(
+    formula = formula_gwr,
+    data = dados_spdf_gwr,
+    bw = bw_adaptativa, # Deverá ser 30
+    kernel = kernel_usado_para_bw, # Deverá ser "gaussian"
+    adaptive = TRUE,
+    dMat = dMat_calibracao
+  )
+}, error = function(e) {
+  cat("Erro ao executar gwr.basic:\n", e$message, "\n")
+  print(str(e)) # Imprime a estrutura do erro para mais detalhes
+  stop("Falha ao executar gwr.basic. Verifique a largura de banda, kernel e os dados.")
+})
+
+if (is.null(gwr_resultado_lista) || is.null(gwr_resultado_lista$SDF)) {
+  stop("Falha ao executar gwr.basic ou resultado não contém SDF.")
+} else {
+  cat("Análise GWR (gwr.basic) concluída. Processando resultados...\n")
+}
+
+gwr_resultados_df <- as.data.frame(gwr_resultado_lista$SDF)
+cat("Resultados GWR (SDF) convertidos para data.frame. Nomes das colunas:\n", paste(names(gwr_resultados_df), collapse=", "), "\n")
+
+if(nrow(dados_gwr_sf_validos) == nrow(gwr_resultados_df)) {
+    cols_gwr_to_remove <- intersect(names(gwr_resultados_df), c("coords.x1", "coords.x2", "optional"))
+    gwr_resultados_df_clean <- gwr_resultados_df[, !names(gwr_resultados_df) %in% cols_gwr_to_remove]
+
+    resultados_gwr_poligonos_sf <- st_sf(
+        cbind(st_drop_geometry(dados_gwr_sf_validos), gwr_resultados_df_clean),
+        geometry = st_geometry(dados_gwr_sf_validos)
+    )
+    cat("Resultados GWR combinados com os polígonos originais.\n")
+} else {
+    stop("Número de linhas nos resultados GWR não corresponde aos dados originais. Não é possível combinar.")
+}
+
+
+# 9. Visualizar os resultados
+cat("Preparando visualizações...\n")
+if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) > 0) {
+    print(head(st_drop_geometry(resultados_gwr_poligonos_sf)))
+    col_names_results <- names(resultados_gwr_poligonos_sf)
+    cat("\nNomes das colunas nos resultados finais (polígonos):\n", paste(col_names_results, collapse=", "), "\n")
+
+    coef_col_name <- "n_drogas.1" # Hipótese mais provável após cbind
+    if (! (coef_col_name %in% col_names_results) ) {
+        cat(paste("AVISO: '", coef_col_name, "' não encontrado. Tentando 'n_drogas' para o coeficiente.\n", sep=""))
+        if ("n_drogas" %in% col_names_results && length(which(col_names_results == "n_drogas")) > 1) {
+             cat(paste("AVISO: Múltiplas colunas 'n_drogas' encontradas. A lógica para identificar o coeficiente pode falhar.\n"))
+             # Poderia tentar identificar pela posição se soubermos exatamente quantas colunas originais existem antes das do GWR
+        }
+        coef_col_name <- "n_drogas" # Fallback ou se não houve renomeação (menos provável com VI e VD com mesmo nome base)
+        if (! (coef_col_name %in% col_names_results) ) {
+            cat(paste("ERRO CRÍTICO: Nenhuma coluna candidata para o coeficiente de n_drogas ('n_drogas' ou 'n_drogas.1') encontrada.\n"))
+        } else {
+            cat(paste("INFO: Usando '", coef_col_name, "' como coluna do coeficiente (fallback).\n"))
+        }
+    } else {
+        cat(paste("INFO: Usando '", coef_col_name, "' como coluna do coeficiente para n_drogas.\n"))
+    }
+
+
+    if (coef_col_name %in% col_names_results) {
+      tryCatch({
+        mapa_coef_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[coef_col_name]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = paste("Coeficiente Local\n(Var: n_drogas)\nCol:", coef_col_name), option = "viridis") +
+          labs(title = "GWR: Coeficiente Local da Variável 'n_drogas'",
+               subtitle = paste0("Largura de banda adaptativa: ", round(bw_adaptativa, 0), " vizinhos; Kernel: ", kernel_usado_para_bw)) +
+          theme_minimal(base_size = 10) +
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_coef_drogas)
+        ggsave("mapa_coef_drogas_gwr_hex.png", plot = mapa_coef_drogas, width = 8, height = 7, dpi = 300, bg = "white")
+        cat(paste0("Mapa do coeficiente 'n_drogas' (coluna '", coef_col_name, "') salvo como mapa_coef_drogas_gwr_hex.png.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa do coeficiente 'n_drogas':\n", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do coeficiente '", coef_col_name, "' (ou sua variante) não encontrada para plotagem.\n"))
+    }
+
+    r2_col_name <- "Local_R2"
+    if (! (r2_col_name %in% col_names_results) ) {
+        cat(paste("AVISO: Coluna '",r2_col_name,"' não encontrada. Verifique os nomes:\n", paste(col_names_results, collapse=", "), "\n"))
+    }
+
+    if (r2_col_name %in% col_names_results) {
+      tryCatch({
+        # Garantir que R2 não seja negativo para a escala de cores (pode acontecer com GWR)
+        resultados_gwr_poligonos_sf$Local_R2_plot <- ifelse(resultados_gwr_poligonos_sf[[r2_col_name]] < 0, 0, resultados_gwr_poligonos_sf[[r2_col_name]])
+        
+        mapa_r2_local <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = Local_R2_plot), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = "R² Local\n(>=0)", option = "plasma", limits = c(0, max(1, max(resultados_gwr_poligonos_sf$Local_R2_plot, na.rm=TRUE)))) +
+          labs(title = "GWR: R² Local", subtitle = "Modelo: n_roubos ~ n_drogas") +
+          theme_minimal(base_size = 10) +
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_r2_local)
+        ggsave("mapa_r2_local_gwr_hex.png", plot = mapa_r2_local, width = 8, height = 7, dpi = 300, bg = "white")
+        cat("Mapa do R² local salvo como mapa_r2_local_gwr_hex.png.\n")
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa R2 local:\n", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna '",r2_col_name,"' não encontrada para plotagem.\n"))
+    }
+
+    t_val_col_name_base <- "n_drogas"
+    t_val_col_name <- "n_drogas_TV"
+    
+    if (! (t_val_col_name %in% col_names_results) ) {
+         cat(paste("AVISO: Coluna para valor-t '", t_val_col_name, "' não encontrada. Verifique nomes:\n",  paste(col_names_results, collapse=", "), "\n"))
+    }
+
+    if (t_val_col_name %in% col_names_results) {
+      tryCatch({
+        lim_max_abs_t <- max(abs(resultados_gwr_poligonos_sf[[t_val_col_name]]), na.rm = TRUE)
+        if (!is.finite(lim_max_abs_t) || is.na(lim_max_abs_t)) lim_max_abs_t <- 2 # Fallback se NA ou Inf
+
+        mapa_t_valor_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[t_val_col_name]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_gradient2(name = paste("Valor-t Local\n(Var:", t_val_col_name_base, ")\nCol:", t_val_col_name),
+                               low = "blue", mid = "white", high = "red",
+                               midpoint = 0, limits = c(-lim_max_abs_t, lim_max_abs_t), oob = scales::squish) +
+          labs(title = paste("GWR: Valor-t Local do Coeficiente '", t_val_col_name_base, "'"),
+               subtitle = "Valores |t| > ~1.96 indicam significância (p < 0.05)") +
+          theme_minimal(base_size = 10) +
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_t_valor_drogas)
+        ggsave("mapa_t_valor_drogas_gwr_hex.png", plot = mapa_t_valor_drogas, width = 8, height = 7, dpi = 300, bg="white")
+        cat(paste0("Mapa do valor-t '", t_val_col_name_base, "' (coluna '", t_val_col_name, "') salvo como mapa_t_valor_drogas_gwr_hex.png.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa valor-t de 'n_drogas':\n", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do valor-t para '", t_val_col_name_base, "' (esperado: '", t_val_col_name ,"') não encontrada para plotagem.\n"))
+    }
+} else {
+    cat("Nenhum resultado GWR para plotar.\n")
+}
+cat("\n--- Análise GWR com grade hexagonal concluída ---\n")
+```
+
+```{r}
+# Supondo que seu objeto sf se chame resultados_gwr_poligonos_sf
+nomes_das_colunas <- colnames(resultados_gwr_poligonos_sf)
+print(nomes_das_colunas)
+```
+

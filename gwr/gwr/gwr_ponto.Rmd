@@ -1,0 +1,571 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# 1. Carregar bibliotecas necessárias
+library(sf)
+library(GWmodel)
+library(dplyr)
+library(ggplot2)
+library(sp)
+
+# --- INÍCIO: Definição dos caminhos dos arquivos ---
+path_roubos <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/roubo.shp"
+path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/drogas.shp"
+path_area_estudo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/centro_expandido/centro_expandido_dissolve.shp"
+# --- FIM: Definição dos caminhos dos arquivos ---
+
+# 2. Ler os arquivos shapefile
+tryCatch({
+  pontos_roubo <- st_read(path_roubos, quiet = TRUE)
+  pontos_drogas <- st_read(path_drogas, quiet = TRUE)
+  area_estudo <- st_read(path_area_estudo, quiet = TRUE)
+}, error = function(e) {
+  stop("Erro ao ler um ou mais arquivos shapefile: ", e$message)
+})
+cat("Arquivos shapefile carregados com sucesso.\n")
+
+# 3. Definir CRS projetado alvo e transformar camadas
+crs_projetado_epsg <- 31983
+crs_projetado_desejado <- st_crs(crs_projetado_epsg)
+cat(paste("CRS projetado desejado para análise: EPSG:", crs_projetado_epsg, "\n", sep=""))
+transformar_crs_se_necessario <- function(sf_object, target_crs_obj, nome_camada) {
+  if (st_crs(sf_object) != target_crs_obj) {
+    cat(paste("Transformando CRS da camada '", nome_camada, "' (EPSG:", st_crs(sf_object)$epsg, ") para EPSG:", st_crs(target_crs_obj)$epsg, "...\n", sep=""))
+    return(st_transform(sf_object, crs = target_crs_obj))
+  } else {
+    cat(paste("CRS da camada '", nome_camada, "' já é o desejado (EPSG:", st_crs(target_crs_obj)$epsg, ").\n", sep=""))
+    return(sf_object)
+  }
+}
+tryCatch({
+  area_estudo <- transformar_crs_se_necessario(area_estudo, crs_projetado_desejado, "area_estudo")
+  pontos_roubo <- transformar_crs_se_necessario(pontos_roubo, crs_projetado_desejado, "pontos_roubo")
+  pontos_drogas <- transformar_crs_se_necessario(pontos_drogas, crs_projetado_desejado, "pontos_drogas")
+}, error = function(e) {
+  stop("Erro durante a transformação de CRS: ", e$message)
+})
+if (st_crs(area_estudo) != crs_projetado_desejado || st_crs(pontos_roubo) != crs_projetado_desejado || st_crs(pontos_drogas) != crs_projetado_desejado) {
+  stop("Falha ao harmonizar CRS para todas as camadas.")
+} else {
+  cat("Todas as camadas foram harmonizadas para o CRS projetado (EPSG:", st_crs(area_estudo)$epsg, ").\n")
+}
+if (st_is_longlat(area_estudo)) {
+    stop("O CRS da área de estudo ainda é geográfico.")
+} else {
+    cat("CRS para criação da grade é projetado (EPSG:", st_crs(area_estudo)$epsg, ").\n")
+}
+
+# 4. Criar uma grade de análise sobre a área de estudo
+cell_size_m <- 500
+cat(paste("Criando grade de análise com células de", cell_size_m, "x", cell_size_m, "metros...\n"))
+grade_base <- st_make_grid(area_estudo, cellsize = c(cell_size_m, cell_size_m), what = "polygons")
+grade_sf_obj <- st_sf(id_celula_grade = 1:length(grade_base), geometry = grade_base) 
+grade_area_estudo <- st_intersection(grade_sf_obj, st_union(area_estudo)) # Este contém id_celula_grade.x e id_celula_grade.y se grade_sf_obj tivesse mais atributos
+# Para simplificar, vamos pegar apenas a geometria e o id da grade_sf_obj que realmente intersectam
+grade_area_estudo <- grade_sf_obj[lengths(st_intersects(grade_sf_obj, st_union(area_estudo))) > 0,]
+cat(paste("Grade de análise criada com", nrow(grade_area_estudo), "células dentro da área de estudo.\n"))
+
+
+# 5. Agregar os pontos à grade
+cat("Agregando pontos à grade...\n")
+# Precisamos garantir que 'grade_area_estudo' tenha uma coluna de ID única e simples para o join
+# Se 'id_celula_grade' já existe e é único, ótimo. Caso contrário, podemos recriá-lo.
+# Vamos assumir que 'id_celula_grade' de grade_sf_obj foi mantido corretamente em grade_area_estudo.
+# Se st_intersection duplicou ou alterou, seria necessário ajustar aqui.
+# Verificação:
+if (!"id_celula_grade" %in% names(grade_area_estudo)) {
+    grade_area_estudo$id_celula_grade <- 1:nrow(grade_area_estudo)
+    cat("Coluna 'id_celula_grade' recriada para 'grade_area_estudo' para garantir unicidade.\n")
+}
+
+
+pontos_roubo_na_grade <- suppressMessages(st_join(pontos_roubo, grade_area_estudo, join = st_intersects))
+contagem_roubos <- pontos_roubo_na_grade %>% st_drop_geometry() %>% 
+                     filter(!is.na(id_celula_grade)) %>% # Garantir que não há NAs no ID
+                     group_by(id_celula_grade) %>% summarise(n_roubos = n(), .groups = 'drop')
+
+pontos_drogas_na_grade <- suppressMessages(st_join(pontos_drogas, grade_area_estudo, join = st_intersects))
+contagem_drogas <- pontos_drogas_na_grade %>% st_drop_geometry() %>% 
+                     filter(!is.na(id_celula_grade)) %>% # Garantir que não há NAs no ID
+                     group_by(id_celula_grade) %>% summarise(n_drogas = n(), .groups = 'drop')
+
+dados_gwr_sf <- grade_area_estudo %>%
+  left_join(contagem_roubos, by = "id_celula_grade") %>%
+  left_join(contagem_drogas, by = "id_celula_grade")
+dados_gwr_sf$n_roubos[is.na(dados_gwr_sf$n_roubos)] <- 0
+dados_gwr_sf$n_drogas[is.na(dados_gwr_sf$n_drogas)] <- 0
+cat("Dados agregados.\n")
+
+# 6. Preparar dados para GWR
+cat("Preparando dados para GWR (SPDF e locais)...\n")
+dados_gwr_sf_validos <- NULL 
+dados_spdf_gwr <- NULL      
+tryCatch({
+  geometrias_vazias <- st_is_empty(dados_gwr_sf$geometry)
+  if(any(geometrias_vazias)){
+    n_vazias <- sum(geometrias_vazias)
+    cat(paste("Aviso:", n_vazias, "célula(s) com geometria vazia. Removendo.\n"))
+    dados_gwr_sf_validos <- dados_gwr_sf[!geometrias_vazias, ]
+    if(nrow(dados_gwr_sf_validos) == 0) stop("Nenhuma célula com geometria válida.")
+  } else {
+    dados_gwr_sf_validos <- dados_gwr_sf 
+  }
+  
+  # Garantir que id_celula_grade está presente e é único em dados_gwr_sf_validos
+  if (!"id_celula_grade" %in% names(dados_gwr_sf_validos)) {
+      dados_gwr_sf_validos$id_celula_grade <- 1:nrow(dados_gwr_sf_validos)
+      cat("Coluna 'id_celula_grade' recriada para 'dados_gwr_sf_validos'.\n")
+  }
+  
+  locais_regressao_sf_centroids <- st_centroid(dados_gwr_sf_validos) 
+  coords_locais_regressao <- st_coordinates(locais_regressao_sf_centroids) 
+  
+  # Manter 'id_celula_grade' nos atributos para o SPDF para futuro join se necessário,
+  # mas principalmente para garantir que n_roubos e n_drogas estão lá.
+  dados_atributos_para_spdf <- st_drop_geometry(dados_gwr_sf_validos) 
+  
+  dados_spdf_gwr <- SpatialPointsDataFrame(coords = coords_locais_regressao, 
+                                           data = dados_atributos_para_spdf, # Deve conter n_roubos, n_drogas, id_celula_grade
+                                           proj4string = CRS(st_crs(dados_gwr_sf_validos)$proj4string))
+                                           
+  cat("Dados SPDF preparados. N Pontos SPDF:", length(dados_spdf_gwr), "\n")
+  cat("Nomes das colunas em dados_spdf_gwr@data:", paste(names(dados_spdf_gwr@data), collapse=", "), "\n")
+}, error = function(e) {
+  stop(paste("Erro ao preparar dados GWR:", e$message))
+})
+
+# 7. Calcular a largura de banda ótima e matriz de distância
+formula_gwr <- n_roubos ~ n_drogas
+if(length(dados_spdf_gwr) < 30) {
+    stop(paste("Nº baixo de pontos (", length(dados_spdf_gwr), ") para GWR."))
+}
+
+cat("Calculando a matriz de distâncias (dMat)...\n")
+dMat_calibracao <- NULL 
+tryCatch({
+  dMat_calibracao <- gw.dist(dp.locat = coordinates(dados_spdf_gwr), 
+                             focus = 0, p = 2, theta = 0, longlat = FALSE)
+  cat("Matriz de distâncias (dMat_calibracao) calculada. Dimensões:", dim(dMat_calibracao), "\n")
+}, error = function(e) {
+    cat("ERRO AO CALCULAR dMat_calibracao:", e$message, "\n"); stop("Falha dMat.")
+})
+
+cat("Calculando a largura de banda adaptativa ótima ...\n")
+bw_adaptativa <- NULL
+tryCatch({
+  bw_adaptativa <- GWmodel::bw.ggwr(formula = formula_gwr,
+                                    data = dados_spdf_gwr, 
+                                    dMat = dMat_calibracao, 
+                                    approach = "AICc",
+                                    kernel = "gaussian",
+                                    adaptive = TRUE)
+}, error = function(e) {
+  cat("ERRO AO CALCULAR LARGURA DE BANDA:", e$message, "\n"); return(NULL)
+})
+
+if (is.null(bw_adaptativa)) {
+  stop("Não foi possível calcular a largura de banda.")
+} else {
+  cat(paste("Largura de banda adaptativa ótima (número de vizinhos):", round(bw_adaptativa, 0), "\n"))
+}
+
+# 8. Executar o GWR usando gwr.basic
+cat("Executando GWR (gwr.basic)...\n")
+gwr_resultado_lista <- NULL
+tryCatch({
+  gwr_resultado_lista <- GWmodel::gwr.basic(
+    formula = formula_gwr,
+    data = dados_spdf_gwr,            
+    bw = bw_adaptativa,
+    kernel = "gaussian",
+    adaptive = TRUE,
+    dMat = dMat_calibracao      
+  )
+}, error = function(e) {
+  cat("Erro ao executar gwr.basic:", e$message, "\n"); print(str(e)); return(NULL)
+})
+
+if (is.null(gwr_resultado_lista) || is.null(gwr_resultado_lista$SDF)) {
+  stop("Falha ao executar gwr.basic ou resultado não contém SDF.")
+} else {
+  cat("Análise GWR (gwr.basic) concluída. Processando resultados...\n")
+}
+
+# O SDF de gwr.basic é um SpatialPointsDataFrame com os resultados
+# Suas linhas correspondem às linhas de dados_spdf_gwr
+gwr_resultados_df <- as.data.frame(gwr_resultado_lista$SDF) # Converter para data.frame
+cat("Resultados GWR (SDF) convertidos para data.frame. Nomes das colunas:", paste(names(gwr_resultados_df), collapse=", "), "\n")
+
+# Adicionar os resultados ao objeto sf original com os POLÍGONOS (dados_gwr_sf_validos)
+# Como a ordem das linhas é a mesma, podemos usar cbind (com cuidado) ou um join por um ID de linha se o criarmos.
+# A maneira mais segura é garantir que 'dados_gwr_sf_validos' tenha um ID de linha e adicioná-lo aos resultados antes do cbind.
+if(nrow(dados_gwr_sf_validos) == nrow(gwr_resultados_df)) {
+    # Remover colunas de coordenadas duplicadas do gwr_resultados_df se existirem (ex: 'coords.x1', 'coords.x2')
+    cols_to_remove <- intersect(names(gwr_resultados_df), c("coords.x1", "coords.x2", "optional"))
+    if(length(cols_to_remove) > 0) {
+        gwr_resultados_df <- gwr_resultados_df[, !(names(gwr_resultados_df) %in% cols_to_remove)]
+    }
+    
+    # Juntar os resultados com os dados originais dos polígonos
+    # Primeiro, remover a geometria de dados_gwr_sf_validos para o cbind, depois adicioná-la de volta
+    resultados_gwr_poligonos_sf <- st_sf(
+        cbind(st_drop_geometry(dados_gwr_sf_validos), gwr_resultados_df),
+        geometry = st_geometry(dados_gwr_sf_validos)
+    )
+    cat("Resultados GWR combinados com os polígonos originais.\n")
+} else {
+    stop("Número de linhas nos resultados GWR não corresponde aos dados originais. Não é possível combinar.")
+}
+
+
+# 9. Visualizar os resultados
+cat("Preparando visualizações...\n")
+if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) > 0) {
+    print(head(st_drop_geometry(resultados_gwr_poligonos_sf)))
+    col_names_results <- names(resultados_gwr_poligonos_sf)
+    cat("\nNomes das colunas nos resultados finais (polígonos):", paste(col_names_results, collapse=", "), "\n")
+
+    # Nome da coluna do coeficiente para 'n_drogas' é 'n_drogas' conforme saída
+    coef_col_name <- "n_drogas" 
+    if (! (coef_col_name %in% col_names_results)) {
+         cat(paste("AVISO: Coluna para coeficiente '", coef_col_name, "' não encontrada. Verifique os nomes: ", paste(col_names_results, collapse=", "), "\n"))
+    }
+
+    if (coef_col_name %in% col_names_results) {
+      tryCatch({
+        mapa_coef_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[coef_col_name]]), color = "grey50", linewidth=0.1) + # Adicionado contorno fino
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = paste("Coeficiente Local\n(", coef_col_name, ")"), option = "viridis") +
+          labs(title = paste("GWR: Coeficiente Local da Variável '", coef_col_name, "'"),
+               subtitle = paste0("Largura de banda adaptativa: ", round(bw_adaptativa, 0), " vizinhos")) +
+          theme_minimal(base_size = 10) + # Ajustar base_size se necessário
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_coef_drogas)
+        ggsave("mapa_coef_drogas_gwr.png", plot = mapa_coef_drogas, width = 8, height = 7, dpi = 300, bg = "white")
+        cat(paste0("Mapa do coeficiente '", coef_col_name, "' salvo.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa do coeficiente:", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do coeficiente '", coef_col_name, "' não encontrada para plotagem.\n"))
+    }
+
+    # Nome da coluna R2 local é 'Local_R2'
+    r2_col_name <- "Local_R2"
+    if (! (r2_col_name %in% col_names_results) ) {
+        cat("AVISO: Coluna 'Local_R2' não encontrada.\n")
+    }
+
+    if (r2_col_name %in% col_names_results) {
+      tryCatch({
+        mapa_r2_local <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[r2_col_name]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = "R² Local", option = "plasma", limits = c(0, max(1, max(resultados_gwr_poligonos_sf[[r2_col_name]], na.rm=TRUE)))) + # Ajustar limite superior
+          labs(title = "GWR: R² Local", subtitle = "Modelo: n_roubos ~ n_drogas") +
+          theme_minimal(base_size = 10) + 
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_r2_local)
+        ggsave("mapa_r2_local_gwr.png", plot = mapa_r2_local, width = 8, height = 7, dpi = 300, bg = "white")
+        cat("Mapa do R² local salvo.\n")
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa R2 local:", e_plot$message, "\n")
+      })
+    } else {
+      cat("Coluna R² Local não encontrada.\n")
+    }
+
+    # Nome da coluna do valor-t para 'n_drogas' é 'n_drogas_TV'
+    t_val_col_name_base <- "n_drogas" 
+    t_val_col_name <- "n_drogas_TV" 
+    if (! (t_val_col_name %in% col_names_results) ) {
+         cat(paste("AVISO: Coluna para valor-t '", t_val_col_name, "' não encontrada. Verifique nomes.\n"))
+    }
+
+    if (t_val_col_name %in% col_names_results) {
+      tryCatch({
+        lim_max_abs_t <- max(abs(resultados_gwr_poligonos_sf[[t_val_col_name]]), na.rm = TRUE)
+        mapa_t_valor_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[t_val_col_name]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_gradient2(name = paste("Valor-t Local\n(", t_val_col_name_base, ")"),
+                               low = "blue", mid = "white", high = "red",
+                               midpoint = 0, limits = c(-lim_max_abs_t, lim_max_abs_t)) +
+          labs(title = paste("GWR: Valor-t Local do Coeficiente '", t_val_col_name_base, "'"),
+               subtitle = "Valores |t| > ~1.96 indicam significância (p < 0.05)") +
+          theme_minimal(base_size = 10) + 
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_t_valor_drogas)
+        ggsave("mapa_t_valor_drogas_gwr.png", plot = mapa_t_valor_drogas, width = 8, height = 7, dpi = 300, bg="white")
+        cat(paste0("Mapa do valor-t '", t_val_col_name_base, "' salvo.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa valor-t:", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do valor-t para '", t_val_col_name_base, "' não encontrada para plotagem.\n"))
+    }
+} else {
+    cat("Nenhum resultado GWR para plotar.\n")
+}
+cat("\n--- Análise GWR concluída ---\n")
+
+
+```
+
+```{r}
+# Supondo que seu objeto sf se chame resultados_gwr_poligonos_sf
+nomes_das_colunas <- colnames(resultados_gwr_poligonos_sf)
+print(nomes_das_colunas)
+```
+
+```{r}
+# VERIFICAR E CORRIGIR NOMES DE COLUNAS DUPLICADOS
+cat("\nVerificando nomes de colunas em 'resultados_gwr_poligonos_sf'...\n")
+colunas_atuais <- names(resultados_gwr_poligonos_sf)
+contagem_nomes <- table(colunas_atuais)
+nomes_duplicados <- contagem_nomes[contagem_nomes > 1]
+
+if (length(nomes_duplicados) > 0) {
+  cat("AVISO: Nomes de colunas duplicados encontrados:\n")
+  print(nomes_duplicados)
+  cat("Nomes de colunas ANTES da correção:\n")
+  print(names(resultados_gwr_poligonos_sf))
+  
+  # Renomear colunas para garantir unicidade
+  names(resultados_gwr_poligonos_sf) <- make.unique(names(resultados_gwr_poligonos_sf), sep = "_") # Adiciona sufixo se duplicado
+  
+  cat("Nomes de colunas APÓS correção (verifique se são aceitáveis):\n")
+  print(names(resultados_gwr_poligonos_sf))
+  cat("--- Fim da verificação de duplicidade ---\n")
+} else {
+  cat("Nenhum nome de coluna duplicado encontrado em 'resultados_gwr_poligonos_sf'.\n")
+  cat("--- Fim da verificação de duplicidade ---\n")
+}
+
+# --- INÍCIO: Definição do caminho do arquivo de SAÍDA GPKG ---
+# Certifique-se de que este caminho está definido corretamente no seu script principal
+# Exemplo: path_saida_gpkg <- "C:/Seu/Caminho/resultados_gwr.gpkg"
+# Se não estiver definido, você pode definir aqui:
+if (!exists("path_saida_gpkg")) {
+  path_saida_gpkg <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados2_gwr_finais.gpkg" # Nome padrão se não definido
+  cat(paste("AVISO: 'path_saida_gpkg' não estava definido. Usando o nome padrão:", path_saida_gpkg, "\n"))
+}
+# --- FIM: Definição do caminho do arquivo de SAÍDA GPKG ---
+
+# 9. Salvar os resultados finais em formato GeoPackage
+cat(paste("\nIniciando salvamento dos resultados em GeoPackage:", path_saida_gpkg, "...\n"))
+
+if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) > 0) {
+  tryCatch({
+    # Remover o arquivo GPKG se ele já existir para evitar erro ao sobrescrever camadas
+    if (file.exists(path_saida_gpkg)) {
+      cat(paste("Arquivo GPKG existente ('", path_saida_gpkg, "') será removido antes de salvar.\n", sep=""))
+      file.remove(path_saida_gpkg)
+    }
+
+    # Salvar a camada de resultados dos polígonos GWR
+    st_write(obj = resultados_gwr_poligonos_sf, 
+             dsn = path_saida_gpkg, 
+             layer = "resultados_gwr_poligonos", # Nome da camada dentro do GPKG
+             driver = "GPKG", 
+             append = FALSE, # FALSE para criar um novo arquivo ou sobrescrever
+             delete_layer = TRUE) # Se a camada existir, ela será substituída
+
+    cat(paste("Resultados GWR (polígonos) salvos com sucesso em:", path_saida_gpkg, "na camada 'resultados_gwr_poligonos'\n"))
+
+    # Opcional: Salvar também a área de estudo no mesmo GPKG para referência
+    # st_write(obj = area_estudo,
+    #          dsn = path_saida_gpkg,
+    #          layer = "area_estudo_referencia",
+    #          driver = "GPKG",
+    #          append = TRUE) # TRUE para adicionar a um GPKG existente
+    # cat(paste("Área de estudo salva com sucesso em:", path_saida_gpkg, "na camada 'area_estudo_referencia'\n"))
+
+  }, error = function(e_save) {
+    cat(paste("ERRO ao salvar o arquivo GeoPackage:", e_save$message, "\n"))
+  })
+} else {
+  cat("Nenhum resultado GWR (resultados_gwr_poligonos_sf) para salvar ou o objeto está vazio.\n")
+}
+
+# A seção de visualização (anteriormente seção 9) viria depois desta, renomeada para seção 10.
+```
+
+```{r}
+cat("\nNomes das colunas ANTES da renomeação:", paste(names(resultados_gwr_poligonos_sf), collapse=", "), "\n")
+
+# Criar um vetor de novos nomes na MESMA ORDEM das colunas atuais
+# EXCLUINDO a coluna 'geometry' da renomeação explícita, pois sf cuida dela.
+# Verifique se as colunas 'X' e 'Y' realmente existem e se você quer mantê-las.
+# Se elas não existirem, remova 'Coord_X' e 'Coord_Y' da lista 'novos_nomes'.
+
+nomes_antigos <- names(st_drop_geometry(resultados_gwr_poligonos_sf)) # Pegar nomes sem a geometria
+novos_nomes_mapa <- list(
+  "id_celula_grade" = "id_cel_grd",
+  "n_roubos"        = "n_roubos",
+  "n_drogas"        = "n_drogas", # Mantido igual se já for curto
+  "Intercept"       = "Intercpt",
+  "n_drogas.1"      = "coef_ndrog", # Assumindo que n_drogas.1 é o coeficiente de n_drogas
+  "y"               = "y_obs",
+  "yhat"            = "y_pred",
+  "residual"        = "residual",
+  "CV_Score"        = "CV_Score",
+  "Stud_residual"   = "res_stud",
+  "Intercept_SE"    = "Interc_SE",
+  "n_drogas_SE"     = "ndrog_SE",
+  "Intercept_TV"    = "Interc_TV",
+  "n_drogas_TV"     = "ndrog_TV",
+  "Local_R2"        = "Local_R2",
+  "X"               = "Coord_X", # Se a coluna X existir e você quiser mantê-la
+  "Y"               = "Coord_Y"  # Se a coluna Y existir e você quiser mantê-la
+)
+
+# Renomear apenas as colunas que existem no objeto sf e estão no mapa de renomeação
+# Isso é mais seguro do que assumir a ordem ou a existência de todas as colunas do exemplo
+resultados_gwr_poligonos_sf_renomeado <- resultados_gwr_poligonos_sf
+
+for (nome_antigo in names(novos_nomes_mapa)) {
+  if (nome_antigo %in% names(resultados_gwr_poligonos_sf_renomeado)) {
+    nome_novo <- novos_nomes_mapa[[nome_antigo]]
+    names(resultados_gwr_poligonos_sf_renomeado)[names(resultados_gwr_poligonos_sf_renomeado) == nome_antigo] <- nome_novo
+    cat(paste("Coluna '", nome_antigo, "' renomeada para '", nome_novo, "'\n", sep=""))
+  }
+}
+
+# Verificar se alguma coluna de geometria foi acidentalmente renomeada para algo que não seja 'geometry'
+# e corrigir se necessário. Isso é uma salvaguarda.
+geom_col_name_actual <- attr(resultados_gwr_poligonos_sf_renomeado, "sf_column")
+if (geom_col_name_actual != "geometry") {
+    names(resultados_gwr_poligonos_sf_renomeado)[names(resultados_gwr_poligonos_sf_renomeado) == geom_col_name_actual] <- "geometry"
+    attr(resultados_gwr_poligonos_sf_renomeado, "sf_column") <- "geometry"
+    cat("Coluna de geometria ajustada para 'geometry'.\n")
+}
+
+
+cat("\nNomes das colunas DEPOIS da renomeação:", paste(names(resultados_gwr_poligonos_sf_renomeado), collapse=", "), "\n")
+
+# Salvar o resultado final com nomes de colunas abreviados como um arquivo Shapefile
+path_saida_shp <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados1_gwr_finais.shp"
+tryCatch({
+  st_write(resultados_gwr_poligonos_sf_renomeado, path_saida_shp, delete_layer = TRUE, driver = "ESRI Shapefile") 
+  cat(paste("Resultados finais da GWR (renomeados) salvos em:", path_saida_shp, "\n"))
+}, error = function(e_write) {
+  cat(paste("Erro ao salvar o arquivo shapefile (renomeado):", e_write$message, "\n"))
+  cat("Verifique se todos os nomes de colunas têm <= 10 caracteres e são únicos.\n")
+  print(paste("Nomes das colunas problemáticos (após renomeação):", paste(names(resultados_gwr_poligonos_sf_renomeado), collapse=", ")))
+})
+
+# --- Fim da Seção de Renomeação e Salvamento ---
+
+# 9. Visualizar os resultados (agora usando resultados_gwr_poligonos_sf_renomeado)
+# Lembre-se de que os nomes das colunas nos seus plots ggplot também precisarão ser atualizados
+# para os novos nomes abreviados!
+cat("Preparando visualizações com colunas renomeadas...\n")
+
+if (!is.null(resultados_gwr_poligonos_sf_renomeado) && nrow(resultados_gwr_poligonos_sf_renomeado) > 0) {
+    print(head(st_drop_geometry(resultados_gwr_poligonos_sf_renomeado)))
+    col_names_results <- names(resultados_gwr_poligonos_sf_renomeado)
+    cat("\nNomes das colunas para plotagem:", paste(col_names_results, collapse=", "), "\n")
+
+    # Atualizar os nomes das colunas para os plots:
+    coef_col_name_plot <- "coef_ndrog" # Era "n_drogas.1", agora "coef_ndrog"
+    r2_col_name_plot <- "Local_R2"     # Já era ok
+    t_val_col_name_plot <- "ndrog_TV"   # Era "n_drogas_TV", agora "ndrog_TV"
+    t_val_col_name_base_plot <- "coef_ndrog" # Base para a legenda do t-value
+
+    if (coef_col_name_plot %in% col_names_results) {
+      tryCatch({
+        mapa_coef_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf_renomeado, aes(fill = .data[[coef_col_name_plot]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = paste("Coef. Loc.\n(", coef_col_name_plot, ")"), option = "viridis") + # Legenda ajustada
+          labs(title = paste("GWR: Coeficiente Local da Variável 'n_drogas'"), # Título pode ser mais descritivo
+               subtitle = paste0("Largura de banda adaptativa: ", round(bw_adaptativa, 0), " vizinhos")) +
+          theme_minimal(base_size = 10) + 
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_coef_drogas)
+        ggsave("mapa_coef_drogas_gwr.png", plot = mapa_coef_drogas, width = 8, height = 7, dpi = 300, bg = "white")
+        cat(paste0("Mapa do coeficiente '", coef_col_name_plot, "' salvo.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa do coeficiente:", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do coeficiente '", coef_col_name_plot, "' não encontrada para plotagem.\n"))
+    }
+
+    if (r2_col_name_plot %in% col_names_results) {
+      tryCatch({
+        mapa_r2_local <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf_renomeado, aes(fill = .data[[r2_col_name_plot]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_viridis_c(name = "R² Local", option = "plasma", limits = c(0, max(1, max(resultados_gwr_poligonos_sf_renomeado[[r2_col_name_plot]], na.rm=TRUE)))) +
+          labs(title = "GWR: R² Local", subtitle = "Modelo: n_roubos ~ n_drogas") +
+          theme_minimal(base_size = 10) + 
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_r2_local)
+        ggsave("mapa_r2_local_gwr.png", plot = mapa_r2_local, width = 8, height = 7, dpi = 300, bg = "white")
+        cat("Mapa do R² local salvo.\n")
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa R2 local:", e_plot$message, "\n")
+      })
+    } else {
+      cat("Coluna R² Local ('",r2_col_name_plot, "') não encontrada.\n")
+    }
+
+    if (t_val_col_name_plot %in% col_names_results) {
+      tryCatch({
+        lim_max_abs_t <- max(abs(resultados_gwr_poligonos_sf_renomeado[[t_val_col_name_plot]]), na.rm = TRUE)
+        mapa_t_valor_drogas <- ggplot() +
+          geom_sf(data = resultados_gwr_poligonos_sf_renomeado, aes(fill = .data[[t_val_col_name_plot]]), color = "grey50", linewidth=0.1) +
+          geom_sf(data = area_estudo, fill = NA, color = "black", linewidth = 0.5) +
+          scale_fill_gradient2(name = paste("Valor-t Loc\n(", t_val_col_name_base_plot, ")"), # Legenda ajustada
+                               low = "blue", mid = "white", high = "red",
+                               midpoint = 0, limits = c(-lim_max_abs_t, lim_max_abs_t)) +
+          labs(title = paste("GWR: Valor-t Local do Coeficiente 'n_drogas'"), # Título pode ser mais descritivo
+               subtitle = "Valores |t| > ~1.96 indicam significância (p < 0.05)") +
+          theme_minimal(base_size = 10) + 
+          theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+                legend.position = "right")
+        print(mapa_t_valor_drogas)
+        ggsave("mapa_t_valor_drogas_gwr.png", plot = mapa_t_valor_drogas, width = 8, height = 7, dpi = 300, bg="white")
+        cat(paste0("Mapa do valor-t '", t_val_col_name_plot, "' salvo.\n"))
+      }, error = function(e_plot){
+        cat("Erro ao plotar mapa valor-t:", e_plot$message, "\n")
+      })
+    } else {
+      cat(paste0("Coluna do valor-t '", t_val_col_name_plot, "' não encontrada para plotagem.\n"))
+    }
+} else {
+    cat("Nenhum resultado GWR para plotar.\n")
+}
+cat("\n--- Análise GWR concluída ---\n")
+```
+
+```{r}
+# Tentar salvar como GeoPackage (mais robusto)
+path_saida_gpkg <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados1_gwr_finais.gpkg"
+tryCatch({
+  st_write(resultados_gwr_poligonos_sf_renomeado, path_saida_gpkg, delete_layer = TRUE) # Driver é inferido para gpkg
+  cat(paste("Resultados finais da GWR (renomeados) salvos em:", path_saida_gpkg, "\n"))
+
+  # Se precisar mesmo de Shapefile, pode tentar converter do GPKG
+  # path_saida_shp <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/h3/resultados1_gwr_finais.shp"
+  # temp_gpkg <- st_read(path_saida_gpkg)
+  # st_write(temp_gpkg, path_saida_shp, delete_layer = TRUE, driver = "ESRI Shapefile")
+  # cat(paste("Convertido para Shapefile em:", path_saida_shp, "\n"))
+
+}, error = function(e_write) {
+  cat(paste("Erro ao salvar o arquivo GeoPackage (renomeado):", e_write$message, "\n"))
+})
+```
+
