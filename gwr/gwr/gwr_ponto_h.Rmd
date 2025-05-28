@@ -271,6 +271,11 @@ if (is.null(bw_adaptativa)) {
   })
 }
 
+
+
+
+```
+```{r}
 if (is.null(bw_adaptativa)) {
   cat("-------------------------------------------------------------------------------------\n")
   cat("ATENÇÃO: Não foi possível calcular automaticamente a largura de banda ótima (bw_adaptativa).\n")
@@ -285,11 +290,10 @@ if (is.null(bw_adaptativa)) {
   cat("   Você pode comentar este bloco de cálculo de 'bw_adaptativa' e definir um valor manualmente,\n")
   cat("   por exemplo: bw_adaptativa <- 75 (representando o número de vizinhos).\n")
   cat("   Isso ajudará a diagnosticar se o problema é a busca da largura de banda ou o GWR em si.\n")
-  cat("   Para fazer isso, comente desde 'cat("Calculando a largura de banda adaptativa ótima ...\\n")'\n") # ASPAS CORRIGIDAS
   cat("   até esta mensagem de erro, e descomente as linhas abaixo para definir manualmente:\n")
   cat("#   bw_adaptativa <- 75 # Exemplo: defina um valor apropriado e descomente\n")
-  cat("#   kernel_usado_para_bw <- "gaussian" # Defina o kernel para gwr.basic (ex: gaussian ou bisquare)\n")
-  cat("#   cat(paste("Usando largura de banda adaptativa definida manualmente:", bw_adaptativa, "vizinhos e kernel:", kernel_usado_para_bw, "\\n")) # Descomente\n\n") # ASPAS CORRIGIDAS
+  cat('#   kernel_usado_para_bw <- "gaussian" # Defina o kernel para gwr.basic (ex: gaussian ou bisquare)\n')
+  cat('#   cat(paste("Usando largura de banda adaptativa definida manualmente:", bw_adaptativa, "vizinhos e kernel:", kernel_usado_para_bw, "\n")) # Descomente\n\n')
   cat("3. AUMENTAR O TAMANHO DA CÉLULA DA GRADE ('cell_size_m'):\n")
   cat("   No início do script, tente aumentar 'cell_size_m' (ex: para 750 ou 1000).\n")
   cat("   Isso resultará em menos células, mas cada uma cobrindo uma área maior, o que pode\n")
@@ -299,8 +303,6 @@ if (is.null(bw_adaptativa)) {
 } else {
   cat(paste("\nLargura de banda adaptativa ótima calculada com sucesso (número de vizinhos):", round(bw_adaptativa, 0), "usando kernel:", kernel_usado_para_bw, "\n"))
 }
-
-
 ```
 
 ```{r}

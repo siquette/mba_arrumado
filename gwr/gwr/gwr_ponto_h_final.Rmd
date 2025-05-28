@@ -11,6 +11,7 @@ library(GWmodel) # Para Geographically Weighted Regression (GWR) e funções rel
 library(dplyr) # Para manipulação e transformação de dados
 library(ggplot2) # Para visualização e criação de mapas
 library(sp) # Necessário para o pacote GWmodel, que utiliza objetos Spatial*DataFrame
+library(spdep) # Para testes de autocorrelação espacial como o I de Moran <--- ADICIONADO
 message("Bibliotecas carregadas com sucesso.")
 
 # --- INÍCIO: Definição dos caminhos dos arquivos ---
@@ -87,7 +88,7 @@ if (st_is_longlat(area_estudo)) {
 # 4. Criar uma grade hexagonal de análise sobre a área de estudo
 # A grade hexagonal é preferível a grades quadradas para análises espaciais
 # pois minimiza o viés direcional e tem vizinhos mais uniformemente espaçados.
-cell_size_m <- 500 # Define o tamanho da célula em metros. Este valor é o 'side length' para hexágonos
+cell_size_m <- 800 # Define o tamanho da célula em metros. Este valor é o 'side length' para hexágonos
                    # ou a distância entre centros de células quadradas para st_make_grid com square=FALSE.
                    # Para hexágonos, o diâmetro (distância entre lados opostos) é cell_size_m * sqrt(3).
 message(paste("Criando grade hexagonal de análise com 'side length' de", cell_size_m, "metros..."))
@@ -123,6 +124,8 @@ grade_area_estudo <- grade_area_estudo %>% dplyr::select(id_celula_grade, geomet
 message(paste("Grade hexagonal de análise criada com", nrow(grade_area_estudo), "células válidas dentro da área de estudo."))
 
 
+
+
 # 5. Agregar os pontos à grade
 message("Iniciando a agregação dos pontos de roubo e drogas às células da grade...")
 
@@ -153,7 +156,26 @@ dados_gwr_sf <- grade_area_estudo %>%
 dados_gwr_sf$n_roubos[is.na(dados_gwr_sf$n_roubos)] <- 0
 dados_gwr_sf$n_drogas[is.na(dados_gwr_sf$n_drogas)] <- 0
 message("Dados de roubos e drogas agregados às células da grade.")
+
+# --- INÍCIO DA MODIFICAÇÃO: Aplicar transformação log1p ---
+# Esta seção é adicionada logo após a agregação e tratamento de NAs.
+message("Aplicando transformação log1p às variáveis de contagem (n_roubos, n_drogas)...")
+dados_gwr_sf <- dados_gwr_sf %>%
+  mutate(
+    log1p_n_roubos = log1p(n_roubos),
+    log1p_n_drogas = log1p(n_drogas)
+  )
+message("Transformação log1p aplicada. Novas colunas criadas: 'log1p_n_roubos' e 'log1p_n_drogas'.")
+# Verificar as primeiras linhas para confirmar as novas colunas
+# cat("Primeiras linhas de 'dados_gwr_sf' após transformação log1p:\n")
+# print(head(st_drop_geometry(dados_gwr_sf)))
+# --- FIM DA MODIFICAÇÃO: Aplicar transformação log1p ---
+
+# (O script continua com o Bloco 6: Preparar dados para GWR)
+# message("Preparando dados para GWR: convertendo para formato SpatialPointsDataFrame (SPDF)...")
+# ...
 ```
+
 ```{r}
 # 6. Preparar dados para GWR
 message("Preparando dados para GWR: convertendo para formato SpatialPointsDataFrame (SPDF)...")
@@ -162,7 +184,9 @@ dados_spdf_gwr <- NULL
 
 tryCatch({
   # As geometrias já foram validadas e as vazias removidas na etapa de criação da grade.
-  dados_gwr_sf_validos <- dados_gwr_sf
+  # 'dados_gwr_sf' agora contém as colunas originais (n_roubos, n_drogas)
+  # e as transformadas (log1p_n_roubos, log1p_n_drogas) do Bloco 5.
+  dados_gwr_sf_validos <- dados_gwr_sf # Esta é a linha chave que usa o SF modificado
 
   if(nrow(dados_gwr_sf_validos) == 0) stop("Nenhuma célula com geometria válida após a agregação. Impossível prosseguir com GWR.")
 
@@ -170,6 +194,7 @@ tryCatch({
   # Precisamos de um ponto representativo para cada polígono (célula da grade).
   # st_point_on_surface é mais robusto que st_centroid para polígonos complexos,
   # pois garante que o ponto resultante esteja DENTRO do polígono.
+  message("Calculando pontos representativos (st_point_on_surface) para as células da grade...")
   locais_regressao_sf_centroids <- st_point_on_surface(dados_gwr_sf_validos)
   coords_locais_regressao <- st_coordinates(locais_regressao_sf_centroids)
 
@@ -178,20 +203,33 @@ tryCatch({
       stop("Coordenadas NA encontradas após st_point_on_surface. Isso pode indicar geometrias problemáticas em 'dados_gwr_sf_validos'.")
   }
 
-  # Extrai os atributos (contagens de roubos e drogas, id_celula_grade)
+  # Extrai os atributos (contagens originais e transformadas, id_celula_grade)
+  # Esta etapa garante que TODAS as colunas de dados_gwr_sf_validos sejam incluídas.
+  message("Extraindo atributos (incluindo colunas transformadas log1p) para o SPDF...")
   dados_atributos_para_spdf <- st_drop_geometry(dados_gwr_sf_validos)
 
   # Cria o objeto SpatialPointsDataFrame. É crucial manter o proj4string correto.
   dados_spdf_gwr <- SpatialPointsDataFrame(coords = coords_locais_regressao,
-                                           data = dados_atributos_para_spdf,
+                                           data = dados_atributos_para_spdf, # Contém as colunas log1p
                                            proj4string = CRS(st_crs(dados_gwr_sf_validos)$proj4string))
 
   message(paste("Dados SPDF preparados com sucesso. Número de Pontos SPDF para GWR:", length(dados_spdf_gwr)))
   message(paste("Nomes das colunas de atributos em dados_spdf_gwr@data:", paste(names(dados_spdf_gwr@data), collapse=", ")))
+  
+  # Opcional: Verificar se as colunas log1p estão realmente presentes
+  if(!("log1p_n_roubos" %in% names(dados_spdf_gwr@data) && "log1p_n_drogas" %in% names(dados_spdf_gwr@data))){
+      warning("AVISO: Colunas 'log1p_n_roubos' ou 'log1p_n_drogas' não encontradas em dados_spdf_gwr@data. Verifique o Bloco 5.")
+  } else {
+      message("Confirmação: Colunas 'log1p_n_roubos' e 'log1p_n_drogas' estão presentes em dados_spdf_gwr@data.")
+  }
+
 }, error = function(e) {
   stop(paste("Erro ao preparar dados para GWR (conversão para SPDF):", e$message))
 })
 ```
+
+
+
 
 ```{r}
 # --- INÍCIO: Inspeção da Esparsidade dos Dados ---
@@ -235,34 +273,31 @@ message("------------------------------------------------------\n")
 ```
 
 
+
+
+
+
+
 ```{r}
 # 7. Calcular a largura de banda ótima e matriz de distância
-# A largura de banda (bandwidth) é um parâmetro crucial no GWR. Ela define o tamanho da vizinhança local
-# usada para ajustar cada regressão. Para cada ponto de calibração (centróide da célula da grade),
-# o GWR considera apenas os pontos dentro de sua largura de banda.
-# Uma largura de banda adaptativa significa que a vizinhança é definida por um número fixo de vizinhos,
-# em vez de uma distância fixa. Isso é particularmente útil em áreas com densidade de dados variável,
-# garantindo que cada regressão local tenha um número mínimo de observações.
-
-formula_gwr <- n_roubos ~ n_drogas
 message(paste("Fórmula GWR definida como:", deparse(formula_gwr)))
 
-# Validação preliminar do número de pontos para GWR.
-# O GWR requer um número razoável de observações para estimar os coeficientes localmente.
-# Um mínimo prático é geralmente >30, mas idealmente >50-60 para modelos mais complexos.
 if(is.null(dados_spdf_gwr) || length(dados_spdf_gwr) < 30) {
     stop(paste("Número insuficiente de pontos (<30) para GWR ou dados_spdf_gwr é nulo. Atualmente:", ifelse(is.null(dados_spdf_gwr), 0, length(dados_spdf_gwr)),
                "\nConsidere aumentar 'cell_size_m' ou verificar a área de estudo e a agregação de dados."))
 }
 
+vars_na_formula <- all.vars(formula_gwr)
+if(!all(vars_na_formula %in% names(dados_spdf_gwr@data))){
+    colunas_faltantes <- setdiff(vars_na_formula, names(dados_spdf_gwr@data))
+    stop(paste("ERRO CRÍTICO: Variáveis da fórmula ('", paste(colunas_faltantes, collapse=", "), "') não encontradas em 'dados_spdf_gwr@data'. Verifique os Blocos 5 e 6."))
+} else {
+    message(paste("Confirmação: Todas as variáveis da fórmula ('", paste(vars_na_formula, collapse=", "),"') estão presentes em 'dados_spdf_gwr@data'."))
+}
+
 message("Calculando a matriz de distâncias (dMat) entre os centróides das células da grade...")
 dMat_calibracao <- NULL
 tryCatch({
-  # gw.dist calcula a matriz de distâncias euclidianas entre os pontos de calibração.
-  # Esta matriz é usada repetidamente na busca pela largura de banda e na execução do GWR,
-  # pré-calculá-la melhora a performance.
-  # longlat = FALSE é crucial pois estamos usando um CRS projetado (em metros), não coordenadas geográficas.
-  # focus = 0: calcula a matriz completa entre todos os pontos (dp.locat vs dp.locat).
   dMat_calibracao <- GWmodel::gw.dist(dp.locat = coordinates(dados_spdf_gwr),
                                       focus = 0, p = 2, theta = 0, longlat = FALSE)
   message(paste("Matriz de distâncias (dMat_calibracao) calculada com sucesso. Dimensões:", dim(dMat_calibracao)[1], "x", dim(dMat_calibracao)[2]))
@@ -270,118 +305,154 @@ tryCatch({
     stop(paste("ERRO CRÍTICO AO CALCULAR dMat_calibracao:", e$message, "\nFalha no cálculo da matriz de distância. Verifique a validade das coordenadas nos dados SPDF."))
 })
 
-message("Iniciando a busca pela largura de banda adaptativa ótima (optimal adaptive bandwidth) usando bw.ggwr...")
+message("Iniciando a busca pela largura de banda adaptativa ótima...")
 bw_adaptativa <- NULL
-error_message_bw <- "" # Acumular mensagens de erro das tentativas
-kernel_usado_para_bw <- "gaussian" # Kernel padrão, será atualizado se outra tentativa funcionar
+error_message_bw <- "" 
+kernel_usado_para_bw <- "gaussian" # Default
 
-# A função GWmodel::bw.ggwr tenta encontrar a largura de banda ótima (número de vizinhos para 'adaptive = TRUE').
-# 'approach': Define o critério de otimização.
-#    - "AICc" (Akaike Information Criterion corrigido): Geralmente mais rápido e robusto, penaliza modelos com mais parâmetros.
-#    - "CV" (Cross-Validation): Minimiza o erro de predição, pode ser mais computacionalmente intensivo.
-# 'kernel': Define a função de ponderação que atribui pesos aos vizinhos.
-#    - "gaussian": Pesos decaem suavemente com a distância, nunca chegam a zero.
-#    - "bisquare" (ou "bi-square"): Pesos decaem e chegam a zero em uma distância finita (ou número de vizinhos),
-#      o que pode ser vantajoso para delimitar a vizinhança de forma mais clara.
-#    - Outros kernels incluem "tricube", "boxcar", "exponential".
+# --- INÍCIO DA MODIFICAÇÃO: Tentar bw.gwr primeiro, depois bw.ggwr ---
+# bw.gwr é mais específico para GWR Gaussiano.
+# bw.ggwr é mais geral mas estava dando problemas.
 
-# Ordem de tentativa: AICc/gaussian, CV/gaussian, AICc/bisquare, CV/bisquare.
-# Esta ordem prioriza métodos geralmente mais rápidos e estáveis, e tenta alternativas se a primeira falhar.
+# Tentativas para bw.gwr (geralmente AIC ou CV)
+tentativas_bw_gwr <- list(
+  list(approach = "AIC", kernel = "gaussian"), # bw.gwr pode não ter 'AICc' diretamente
+  list(approach = "CV", kernel = "gaussian"),
+  list(approach = "AIC", kernel = "bisquare"),
+  list(approach = "CV", kernel = "bisquare")
+)
 
-tentativas_bw <- list(
+# Tentativas para bw.ggwr (se bw.gwr falhar ou não for o desejado)
+tentativas_bw_ggwr <- list(
   list(approach = "AICc", kernel = "gaussian"),
   list(approach = "CV", kernel = "gaussian"),
   list(approach = "AICc", kernel = "bisquare"),
   list(approach = "CV", kernel = "bisquare")
 )
 
-for (i in 1:length(tentativas_bw)) {
-  params <- tentativas_bw[[i]]
-  message(paste0("\n--- Tentativa ", i, " para bw.ggwr: approach = '", params$approach, "', kernel = '", params$kernel, "' ---"))
+funcao_bw_usada <- "" # Para rastrear qual função foi usada
+
+# Primeiro, tentar com bw.gwr
+message("\n--- Priorizando GWmodel::bw.gwr (específico para GWR Gaussiano) ---")
+for (i in 1:length(tentativas_bw_gwr)) {
+  params <- tentativas_bw_gwr[[i]]
+  message(paste0("\n--- Tentativa com bw.gwr ", i, ": approach = '", params$approach, "', kernel = '", params$kernel, "' ---"))
   tryCatch({
-    bw_adaptativa_temp <- GWmodel::bw.ggwr(
+    bw_adaptativa_temp <- GWmodel::bw.gwr( 
       formula = formula_gwr,
       data = dados_spdf_gwr,
       dMat = dMat_calibracao,
-      approach = params$approach,
+      approach = params$approach, 
       kernel = params$kernel,
       adaptive = TRUE
     )
-    # Validação do resultado da largura de banda: deve ser numérica, positiva e não exceder o número total de pontos.
     if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0 && bw_adaptativa_temp <= nrow(dados_spdf_gwr@data)) {
       bw_adaptativa <- bw_adaptativa_temp
       kernel_usado_para_bw <- params$kernel
-      message(paste("Sucesso na Tentativa ", i, "! Largura de banda encontrada:", round(bw_adaptativa, 0), "vizinhos, usando kernel:", kernel_usado_para_bw))
-      break # Sai do loop se encontrar uma largura de banda válida
+      funcao_bw_usada <- "bw.gwr"
+      message(paste("Sucesso com bw.gwr na Tentativa ", i, "! Largura de banda:", round(bw_adaptativa, 0), "vizinhos, kernel:", kernel_usado_para_bw))
+      break 
     } else {
-      msg <- paste0("Tentativa ", i, " (", params$approach, ", ", params$kernel, ") não retornou uma largura de banda válida ou numérica positiva (valor: ", bw_adaptativa_temp, ").")
+      msg <- paste0("bw.gwr Tentativa ", i, " (", params$approach, ", ", params$kernel, ") não retornou uma largura de banda válida (valor: ", bw_adaptativa_temp, ").")
       message(msg)
       error_message_bw <<- paste0(error_message_bw, msg, "; ")
     }
   }, error = function(e) {
-    message(paste("ERRO na Tentativa ", i, " (", params$approach, ", ", params$kernel, "):", e$message))
-    error_message_bw <<- paste0(error_message_bw, "Erro (", params$approach, ",", params$kernel, "): ", e$message, "; ")
+    message(paste("ERRO com bw.gwr na Tentativa ", i, " (", params$approach, ", ", params$kernel, "):", e$message))
+    error_message_bw <<- paste0(error_message_bw, "Erro bw.gwr (", params$approach, ",", params$kernel, "): ", e$message, "; ")
   })
-  if (!is.null(bw_adaptativa)) break # Se bw_adaptativa foi definida, saia do loop
+  if (!is.null(bw_adaptativa)) break 
 }
 
-# --- Bloco 2: Verificação da Largura de Banda e Sugestões ---
-# Este bloco é executado se a busca automática pela largura de banda falhar.
+
+# Se bw.gwr falhou, tentar bw.ggwr (como fallback ou se for a intenção original)
+if (is.null(bw_adaptativa)) {
+    message("\n--- bw.gwr falhou ou não encontrou largura de banda. Tentando GWmodel::bw.ggwr (Gaussiano implícito) ---")
+    for (i in 1:length(tentativas_bw_ggwr)) {
+      params <- tentativas_bw_ggwr[[i]]
+      message(paste0("\n--- Tentativa com bw.ggwr ", i, ": approach = '", params$approach, "', kernel = '", params$kernel, "' ---"))
+      tryCatch({
+        bw_adaptativa_temp <- GWmodel::bw.ggwr(
+          formula = formula_gwr,
+          data = dados_spdf_gwr,
+          dMat = dMat_calibracao,
+          approach = params$approach,
+          kernel = params$kernel,
+          adaptive = TRUE
+          # NENHUM ARGUMENTO 'family' AQUI, assumindo Gaussiano
+        )
+        if (!is.null(bw_adaptativa_temp) && is.numeric(bw_adaptativa_temp) && bw_adaptativa_temp > 0 && bw_adaptativa_temp <= nrow(dados_spdf_gwr@data)) {
+          bw_adaptativa <- bw_adaptativa_temp
+          kernel_usado_para_bw <- params$kernel
+          funcao_bw_usada <- "bw.ggwr"
+          message(paste("Sucesso com bw.ggwr na Tentativa ", i, "! Largura de banda:", round(bw_adaptativa, 0), "vizinhos, kernel:", kernel_usado_para_bw))
+          break 
+        } else {
+          msg <- paste0("bw.ggwr Tentativa ", i, " (", params$approach, ", ", params$kernel, ") não retornou uma largura de banda válida (valor: ", bw_adaptativa_temp, ").")
+          message(msg)
+          error_message_bw <<- paste0(error_message_bw, msg, "; ")
+        }
+      }, error = function(e) {
+        message(paste("ERRO com bw.ggwr na Tentativa ", i, " (", params$approach, ", ", params$kernel, "):", e$message))
+        if (grepl("the condition has length > 1", e$message, fixed = TRUE)) {
+            message("AVISO: O erro 'the condition has length > 1' persistiu mesmo sem especificar 'family' em bw.ggwr.")
+        }
+        error_message_bw <<- paste0(error_message_bw, "Erro bw.ggwr (", params$approach, ",", params$kernel, "): ", e$message, "; ")
+      })
+      if (!is.null(bw_adaptativa)) break 
+    }
+}
+# --- FIM DA MODIFICAÇÃO ---
+
+# Bloco de Verificação da Largura de Banda e Sugestões
 if (is.null(bw_adaptativa)) {
   cat("-------------------------------------------------------------------------------------\n")
   cat("ATENÇÃO: Não foi possível calcular automaticamente a largura de banda ótima (bw_adaptativa)\n")
-  cat("após todas as tentativas com bw.ggwr.\n")
+  cat("após todas as tentativas com bw.gwr e bw.ggwr (para modelo Gaussiano).\n") 
   cat("Mensagens de erro/aviso acumuladas das tentativas:\n", error_message_bw, "\n\n")
   cat("Este problema frequentemente ocorre devido a:\n")
-  cat("  a) Esparsidade dos dados: Muitas células com valores zero ou muito baixos para a(s) variável(is) independente(s).\n")
-  cat("     A busca por largura de banda pode tentar valores muito pequenos (poucos vizinhos), levando a singularidades\n")
-  cat("     na matriz de ponderação ou na matriz de design local (X'WX), tornando-a não invertível.\n")
-  cat("  b) Colinearidade local: Variáveis independentes fortemente correlacionadas em algumas vizinhanças locais,\n")
-  cat("     o que pode levar a problemas de identificabilidade dos coeficientes.\n")
-  cat("  c) Número insuficiente de observações (células) para o GWR, especialmente se a largura de banda ótima for muito pequena.\n\n")
+  cat("  a) Esparsidade dos dados (mesmo após transformação log1p, muitos valores 'log1p(0)=0' podem ser problemáticos se levarem a pouca variância local).\n") 
+  cat("  b) Colinearidade local: Variáveis independentes fortemente correlacionadas em algumas vizinhanças locais.\n")
+  cat("  c) Número insuficiente de observações (células) para o GWR, especialmente se a largura de banda ótima for muito pequena.\n")
+  cat("  d) Se o erro 'valor ausente onde TRUE/FALSE necessário' ou 'the condition has length > 1' persistiu, é provável um bug no pacote GWmodel.\n\n") 
+  
   cat("Próximas Etapas Sugeridas para Solução:\n")
-  cat("1. REVISE CUIDADOSAMENTE O OUTPUT DA 'Inspeção da Esparsidade dos Dados' impresso anteriormente.\n")
-  cat("   Se houver uma alta porcentagem de células com zero ocorrências (e.g., > 70-80% para 'n_drogas'),\n")
-  cat("   isso é uma causa provável e precisa ser endereçada (ver item 3).\n\n")
+  cat("1. REVISE CUIDADOSAMENTE O OUTPUT DA 'Inspeção da Esparsidade dos Dados'.\n")
+  cat("   Se houver uma alta porcentagem de células com zero ocorrências (originais) ou valores transformados idênticos (log1p(0)=0),\n")
+  cat("   isso pode contribuir para o problema, especialmente para GWR Gaussiano que espera alguma variabilidade.\n\n")
   cat("2. TENTAR UMA LARGURA DE BANDA ADAPTATIVA MANUALMENTE MAIOR (PARA DIAGNÓSTICO):\n")
-  cat("   Você pode comentar o bloco de cálculo de 'bw_adaptativa' acima (seção 7) e definir um valor manualmente.\n")
-  cat("   Escolha um número de vizinhos que faça sentido para sua área de estudo (e.g., 10-25% do total de células).\n")
-  cat("   Um valor muito pequeno pode levar a resultados instáveis; um valor muito grande pode aproximar o GWR de uma regressão global.\n")
-  cat("   Exemplo: Se você tem 200 células, tente bw_adaptativa <- 30 ou bw_adaptativa <- 50.\n")
+  cat("   Comente o bloco de cálculo de 'bw_adaptativa' acima e defina um valor manualmente.\n")
+  cat("   Exemplo: Se você tem 987 células, tente bw_adaptativa <- 50 (aprox 5%) ou bw_adaptativa <- 98 (aprox 10%).\n")
   cat("   Descomente e ajuste as linhas abaixo para definir manualmente:\n")
-  cat("#   bw_adaptativa <- 50 # Exemplo: defina um número de vizinhos apropriado (e.g., 10-25% do total de células)\n")
-  cat('#   kernel_usado_para_bw <- "gaussian" # Defina o kernel para gwr.basic (ex: "gaussian" ou "bisquare")\n')
+  cat("#   bw_adaptativa <- 75 # Exemplo: defina um número de vizinhos apropriado\n")
+  cat('#   kernel_usado_para_bw <- "gaussian" # Defina o kernel para gwr.basic\n')
+  cat('#   funcao_bw_usada <- "manual" # Indicar que foi manual\n')
   cat('#   message(paste("Usando largura de banda adaptativa definida manualmente:", bw_adaptativa, "vizinhos e kernel:", kernel_usado_para_bw))\n\n')
   cat("3. AUMENTAR O TAMANHO DA CÉLULA DA GRADE ('cell_size_m'):\n")
-  cat("   No início do script (seção 4), tente aumentar 'cell_size_m' (ex: para 750, 1000, ou mais).\n")
+  cat("   No início do script (Bloco 4), tente aumentar 'cell_size_m' (ex: para 750, 1000).\n")
   cat("   Isso resultará em menos células, mas cada uma cobrindo uma área maior, o que pode\n")
-  cat("   reduzir a esparsidade e aumentar a chance de encontrar uma largura de banda estável.\n")
-  cat("   Esta é frequentemente a solução mais eficaz para problemas de esparsidade em dados de contagem.\n\n")
-  cat("4. RECONSIDERAR AS VARIÁVEIS DO MODELO:\n")
-  cat("   Se a variável independente ('n_drogas') for extremamente esparsa, talvez não seja adequada para GWR neste nível de granularidade.\n")
-  cat("   Considere agregar dados em categorias mais amplas ou usar outras variáveis que apresentem maior variabilidade espacial.\n")
+  cat("   reduzir a esparsidade e aumentar a variabilidade local, potencialmente ajudando o GWR Gaussiano.\n\n")
+  cat("4. RECONSIDERAR AS VARIÁVEIS DO MODELO OU A TRANSFORMAÇÃO:\n")
+  cat("   Se a variável independente transformada ('log1p_n_drogas') ainda for muito esparsa (muitos zeros) ou tiver pouca variação,\n")
+  cat("   o GWR Gaussiano pode ter dificuldades. Outras transformações ou variáveis podem ser necessárias.\n\n")
+  cat("5. VERIFICAR A VERSÃO DO PACOTE GWmodel E ATUALIZAR SE POSSÍVEL:\n")
+  cat("   Problemas persistentes podem estar relacionados a bugs em versões específicas.\n\n")
   cat("-------------------------------------------------------------------------------------\n")
   stop("Cálculo automático da largura de banda falhou. Analise as mensagens e sugestões acima para depuração.")
 } else {
-  message(paste("\nLargura de banda adaptativa ótima calculada com sucesso:", round(bw_adaptativa, 0),
+  message(paste("\nLargura de banda adaptativa ótima calculada com sucesso usando", funcao_bw_usada, ":", round(bw_adaptativa, 0), 
               "vizinhos, utilizando o kernel:", kernel_usado_para_bw, "."))
-  # Arredondar a largura de banda para o inteiro mais próximo, pois representa um número de vizinhos.
   bw_adaptativa <- round(bw_adaptativa, 0)
-  # Uma largura de banda de 1 vizinho ou menos não faz sentido para a regressão.
-  # Geralmente, um mínimo de 2 ou 3 vizinhos é necessário para a estimativa de coeficientes.
   if (bw_adaptativa < 2) {
       warning(paste0("A largura de banda calculada (", bw_adaptativa, ") é muito pequena. Isso pode levar a resultados instáveis ou erros no GWR."))
-      # Poderia adicionar uma lógica para forçar um mínimo, e.g., bw_adaptativa <- max(bw_adaptativa, 5)
+      # Poderia forçar um mínimo, e.g., bw_adaptativa <- max(bw_adaptativa, 20) e setar kernel_usado_para_bw
   }
   message(paste("Largura de banda final (arredondada para o inteiro mais próximo):", bw_adaptativa, "vizinhos."))
 }
 
-# --- Bloco 3: Execução do GWR ---
-# Confirmação antes de executar o GWR para garantir que os parâmetros críticos estão definidos.
 message(paste("\nCONFIRMAÇÃO ANTES DO GWR: Usando largura de banda adaptativa (número de vizinhos):", bw_adaptativa,
-              "e kernel:", kernel_usado_para_bw, "para gwr.basic."))
+              "e kernel:", kernel_usado_para_bw, "para gwr.basic (modelo Gaussiano implícito)."))
 
-# Verificações finais de validade dos parâmetros antes de chamar gwr.basic.
 if (is.null(bw_adaptativa) || !is.numeric(bw_adaptativa) || bw_adaptativa <= 0) {
     stop("ERRO CRÍTICO: 'bw_adaptativa' é inválida (NULL, não numérica ou não positiva) antes de iniciar a Etapa 8 (gwr.basic). Verifique o cálculo da largura de banda.")
 }
@@ -389,63 +460,77 @@ if (is.null(kernel_usado_para_bw) || !kernel_usado_para_bw %in% c("gaussian", "b
     stop(paste("ERRO CRÍTICO: 'kernel_usado_para_bw' ('", kernel_usado_para_bw, "') é inválido para gwr.basic. Verifique os nomes dos kernels suportados."))
 }
 
-
-
 ```
 
 ```{r}
 # 8. Executar o GWR usando gwr.basic
-message("Executando a Regressão Geograficamente Ponderada (GWR) com gwr.basic...")
+message("Executando a Regressão Geograficamente Ponderada (GWR) com gwr.basic (modelo Gaussiano implícito)...") # <--- MODIFICADO
 gwr_resultado_lista <- NULL # Para armazenar o output complexo de gwr.basic
+
+# A fórmula (formula_gwr), dados (dados_spdf_gwr), largura de banda (bw_adaptativa),
+# kernel (kernel_usado_para_bw), e matriz de distância (dMat_calibracao)
+# já foram definidos e verificados nos blocos anteriores.
+
 tryCatch({
   # GWmodel::gwr.basic executa a regressão GWR.
-  # formula: A fórmula do modelo (variável dependente ~ variáveis independentes).
-  # data: O Spatial*DataFrame contendo as variáveis e coordenadas.
-  # bw: A largura de banda calculada (número de vizinhos neste caso).
-  # kernel: A função de ponderação a ser usada.
-  # adaptive: TRUE indica que 'bw' é um número de vizinhos.
-  # dMat: A matriz de distâncias pré-calculada para otimizar o desempenho.
+  # Para o modelo Gaussiano padrão, não especificamos o argumento 'family'.
   gwr_resultado_lista <- GWmodel::gwr.basic(
-    formula = formula_gwr,
-    data = dados_spdf_gwr, # Deve ser um Spatial*DataFrame
-    bw = bw_adaptativa,    # Largura de banda (número de vizinhos para adaptativa)
+    formula = formula_gwr,      # Deve ser log1p_n_roubos ~ log1p_n_drogas
+    data = dados_spdf_gwr,      # Deve conter as colunas transformadas
+    bw = bw_adaptativa,         # Largura de banda (número de vizinhos para adaptativa)
     kernel = kernel_usado_para_bw, # Função kernel
-    adaptive = TRUE,       # Indica que 'bw' é um número de vizinhos
-    dMat = dMat_calibracao # Matriz de distâncias pré-calculada (otimização)
+    adaptive = TRUE,            # Indica que 'bw' é um número de vizinhos
+    dMat = dMat_calibracao      # Matriz de distâncias pré-calculada (otimização)
+    # NENHUM ARGUMENTO 'family' AQUI, assumindo Gaussiano para dados contínuos
   )
 }, error = function(e) {
-  cat("Erro crítico ao executar gwr.basic:\n", e$message, "\n")
-  # Causas comuns de falha em gwr.basic incluem:
-  # - Largura de banda muito pequena, resultando em poucas observações por regressão local.
-  # - Singularidade da matriz de design local (X'WX) devido a colinearidade ou falta de variância nas variáveis independentes em uma vizinhança.
-  # - Problemas com os dados de entrada (NA, valores infinitos, etc.).
-  stop(paste("Falha ao executar gwr.basic. Verifique a largura de banda, o kernel, os dados de entrada (dados_spdf_gwr), e a matriz de distância (dMat_calibracao).\n",
-               "Causas comuns incluem: singularidade devido a poucos vizinhos, dados problemáticos, ou dMat incorreta."))
+  cat("Erro crítico ao executar gwr.basic (modelo Gaussiano implícito):\n", e$message, "\n") # <--- MODIFICADO
+  # Se o erro for 'the condition has length > 1', o bug do GWmodel persiste.
+  if (grepl("the condition has length > 1", e$message, fixed = TRUE)) {
+      message("AVISO: O erro 'the condition has length > 1' persistiu em gwr.basic mesmo sem especificar 'family'. Isso indica um problema fundamental no pacote GWmodel que afeta até mesmo o GWR Gaussiano padrão.")
+  }
+  stop(paste("Falha ao executar gwr.basic (modelo Gaussiano implícito). Verifique a largura de banda, o kernel, os dados de entrada (dados_spdf_gwr), e a matriz de distância (dMat_calibracao).\n", # <--- MODIFICADO
+               "Causas comuns (além de bugs no pacote) incluem: singularidade devido a poucos vizinhos, dados problemáticos, ou dMat incorreta."))
 })
 
 if (is.null(gwr_resultado_lista) || is.null(gwr_resultado_lista$SDF)) {
-  stop("Falha ao executar gwr.basic ou o resultado não contém o componente 'SDF' (SpatialDataFrame com os resultados).")
+  stop("Falha ao executar gwr.basic (modelo Gaussiano implícito) ou o resultado não contém o componente 'SDF' (SpatialDataFrame com os resultados).") # <--- MODIFICADO
 } else {
-  message("Análise GWR (gwr.basic) concluída com sucesso. Processando os resultados...")
+  message("Análise GWR (gwr.basic, modelo Gaussiano implícito) concluída com sucesso. Processando os resultados...") # <--- MODIFICADO
 }
 
 # O objeto gwr_resultado_lista$SDF é um SpatialPointsDataFrame ou SpatialPolygonsDataFrame
 # contendo os resultados locais para cada ponto de calibração (centróide da célula da grade).
 # Estes resultados incluem:
-# - Coeficientes locais para o intercepto e cada variável independente (e.g., 'Intercept', 'n_drogas').
-# - Valores-t locais para cada coeficiente (e.g., 'Intercept_TV', 'n_drogas_TV').
+# - Coeficientes locais para o intercepto e cada variável independente (e.g., 'Intercept', 'log1p_n_drogas').
+# - Valores-t locais para cada coeficiente (e.g., 'Intercept_TV', 'log1p_n_drogas_TV').
 # - R² local ('Local_R2'), indicando a capacidade explicativa do modelo em cada localização.
 # - Valores preditos ('yhat') e resíduos ('residual').
 gwr_resultados_sdf <- gwr_resultado_lista$SDF
 message(paste("Resultados GWR (SDF) obtidos. Nomes das colunas no SDF do GWR:", paste(names(gwr_resultados_sdf), collapse=", ")))
 
-# Combinar os resultados do GWR (que estão em formato SPDF, nos centróides)
-# de volta aos polígonos originais (dados_gwr_sf_validos).
-# É crucial garantir que a correspondência entre os resultados e os polígonos da grade seja correta.
-# Como dados_spdf_gwr foi criado diretamente a partir de dados_gwr_sf_validos, a ordem das linhas
-# deve ser a mesma, mas um join explícito por um ID único é a forma mais robusta e segura.
+# Verificar se a variável dependente no SDF corresponde à VD da fórmula (que é log1p_n_roubos)
+# O GWmodel armazena a variável dependente original usada no modelo na coluna 'y' do SDF.
+var_dependente_formula <- all.vars(formula_gwr)[1] # Deve ser "log1p_n_roubos"
+if ("y" %in% names(gwr_resultados_sdf)) {
+    # Vamos verificar se os valores da coluna 'y' do SDF são de fato os da nossa VD transformada.
+    # Isso é mais uma checagem de sanidade.
+    if (all(gwr_resultados_sdf$y == dados_spdf_gwr@data[[var_dependente_formula]], na.rm = TRUE)) {
+        message(paste0("Confirmação: A coluna 'y' no SDF do GWR corresponde aos valores de '", var_dependente_formula, "' dos dados de entrada."))
+    } else {
+        warning(paste0("AVISO: A coluna 'y' no SDF do GWR pode não corresponder exatamente aos valores de '", var_dependente_formula, "' dos dados de entrada. Verifique."))
+    }
+} else {
+    warning("AVISO: Coluna 'y' (variável dependente) não encontrada no SDF do GWR.")
+}
 
+# Verificar se a coluna da variável independente principal da fórmula existe nos resultados
+var_independente_principal_formula <- all.vars(formula_gwr)[2] # Deve ser "log1p_n_drogas"
+if (!(var_independente_principal_formula %in% names(gwr_resultados_sdf))) {
+    warning(paste0("AVISO: A coluna do coeficiente para '", var_independente_principal_formula, "' não foi encontrada diretamente com esse nome no SDF do GWR. Verifique os nomes das colunas listados acima."))
+}
 
+# (O script continua com o bloco de junção dos resultados aos polígonos originais
 
 
 ```
@@ -518,115 +603,182 @@ if(nrow(dados_gwr_sf_validos) == nrow(gwr_resultados_sdf)) {
 
 
 ```{r}
-# 9. Visualizar os resultados
-# A visualização dos resultados do GWR em mapas é uma etapa crucial para compreender a
-# não estacionariedade espacial das relações modeladas. Ao invés de um único coeficiente
-# global, o GWR produz um conjunto de coeficientes locais para cada localização na grade,
-# revelando como as relações variam no espaço. Vamos mapear os três principais resultados
-# para uma interpretação abrangente:
-#   - Coeficientes locais: Mostram a magnitude e direção da relação entre 'n_drogas' e 'n_roubos'
-#     em cada polígono da grade.
-#   - R² Local: Indica o poder explicativo do modelo em cada localização, ou seja, a proporção
-#     da variância da variável dependente ('n_roubos') que é explicada pelo modelo GWR localmente.
-#   - Valores-t locais: Avaliam a significância estatística de cada coeficiente local,
-#     identificando onde a relação observada é robusta e não apenas devido ao acaso.
+#--- Bloco 9: Combinar Resultados GWR aos Polígonos e Visualizar ---
 
-message("\n--- Preparando visualizações dos resultados do GWR ---")
+message("\n--- Iniciando Bloco 9: Combinando Resultados GWR aos Polígonos e Preparando Visualizações ---")
 
-# Verificar se o objeto de resultados existe e não está vazio. Esta é uma verificação
-# de robustez para garantir que as operações de plotagem não falhem se o GWR não tiver
-# sido executado com sucesso ou se o objeto `resultados_gwr_poligonos_sf` estiver vazio.
+# Verificar se os objetos necessários existem
+if (!exists("dados_gwr_sf_validos") || is.null(dados_gwr_sf_validos)) {
+    stop("ERRO CRÍTICO Bloco 9: 'dados_gwr_sf_validos' não encontrado ou é NULL.")
+}
+if (!exists("gwr_resultados_sdf") || is.null(gwr_resultados_sdf)) {
+    stop("ERRO CRÍTICO Bloco 9: 'gwr_resultados_sdf' (output do GWR) não encontrado ou é NULL.")
+}
+
+# Combinar os resultados do GWR (que estão em formato SPDF, nos centróides)
+# de volta aos polígonos originais (dados_gwr_sf_validos).
+# É crucial garantir que a correspondência entre os resultados e os polígonos da grade seja correta.
+# Como dados_spdf_gwr (entrada para gwr.basic) foi criado diretamente a partir de dados_gwr_sf_validos
+# (na mesma ordem e com os mesmos pontos representativos), a ordem das linhas DEVE ser a mesma.
+# No entanto, um join explícito por 'id_celula_grade' é mais robusto.
+
+resultados_gwr_poligonos_sf <- NULL # Inicializar
+
+if(nrow(dados_gwr_sf_validos) == nrow(gwr_resultados_sdf)) {
+    message("Número de linhas corresponde entre polígonos originais e resultados GWR. Prosseguindo com a combinação...")
+    
+    # Extrair os dados (atributos) do SDF do GWR para um data.frame.
+    gwr_resultados_df_para_join <- as.data.frame(gwr_resultados_sdf)
+
+    # Adicionar 'id_celula_grade' de 'dados_gwr_sf_validos' aos resultados do GWR para um join robusto.
+    # Assumimos que a ordem das linhas em dados_gwr_sf_validos corresponde à ordem em gwr_resultados_sdf
+    # porque gwr_resultados_sdf foi gerado a partir de dados_spdf_gwr, que por sua vez
+    # foi gerado a partir de dados_gwr_sf_validos.
+    if ("id_celula_grade" %in% names(dados_gwr_sf_validos)) {
+        gwr_resultados_df_para_join$id_celula_grade <- dados_gwr_sf_validos$id_celula_grade
+        message("Coluna 'id_celula_grade' adicionada aos resultados do GWR (gwr_resultados_df_para_join) para join.")
+    } else {
+        stop("ERRO CRÍTICO Bloco 9: 'id_celula_grade' não encontrada em 'dados_gwr_sf_validos'. Impossível realizar join seguro.")
+    }
+
+    # --- INÍCIO DA MODIFICAÇÃO: Renomear coluna do coeficiente e valor-t da VI ---
+    # A VI na fórmula é all.vars(formula_gwr)[2], que deve ser "log1p_n_drogas"
+    var_indep_na_formula <- all.vars(formula_gwr)[2] # Ex: "log1p_n_drogas"
+    
+    nome_coef_original_no_sdf <- var_indep_na_formula
+    novo_nome_coef_para_join <- paste0("coef_", var_indep_na_formula) # Ex: "coef_log1p_n_drogas"
+    
+    nome_tval_original_no_sdf <- paste0(var_indep_na_formula, "_TV") # Ex: "log1p_n_drogas_TV"
+    # Não vamos renomear a coluna do valor-t, mas vamos referenciá-la pelo nome correto.
+
+    if (nome_coef_original_no_sdf %in% names(gwr_resultados_df_para_join)) {
+        names(gwr_resultados_df_para_join)[names(gwr_resultados_df_para_join) == nome_coef_original_no_sdf] <- novo_nome_coef_para_join
+        message(paste0("Coluna do coeficiente para '", nome_coef_original_no_sdf, "' nos resultados GWR renomeada para '", novo_nome_coef_para_join, "'."))
+    } else {
+        warning(paste0("Coluna do coeficiente '", nome_coef_original_no_sdf, "' não encontrada diretamente nos resultados do GWR (gwr_resultados_df_para_join). Verifique os nomes das colunas no output do GWmodel. O mapa de coeficientes pode falhar."))
+    }
+    # --- FIM DA MODIFICAÇÃO ---
+
+    # Definir as colunas de resultados do GWR que serão mantidas após o join.
+    # 'y' no SDF do GWR corresponde à variável dependente da fórmula (log1p_n_roubos).
+    cols_gwr_a_manter <- c("id_celula_grade",
+                           "Intercept", "Intercept_TV",
+                           novo_nome_coef_para_join, nome_tval_original_no_sdf, # Usando os nomes corretos/renomeados
+                           "Local_R2", "y", "yhat", "residual")
+
+    # Filtrar colunas para o join, selecionando apenas as relevantes.
+    # Usar `all_of` garante que apenas as colunas existentes e listadas sejam selecionadas,
+    # gerando um erro se alguma coluna essencial estiver faltando.
+    cols_existentes_no_join_df <- intersect(cols_gwr_a_manter, names(gwr_resultados_df_para_join))
+    
+    # Checar se colunas essenciais para plotagem estão presentes
+    if (!(novo_nome_coef_para_join %in% cols_existentes_no_join_df)) {
+        warning(paste0("AVISO Bloco 9: Coluna do coeficiente '", novo_nome_coef_para_join, "' não está presente para o join. O mapa de coeficientes falhará."))
+    }
+    if (!(nome_tval_original_no_sdf %in% cols_existentes_no_join_df)) {
+        warning(paste0("AVISO Bloco 9: Coluna do valor-t '", nome_tval_original_no_sdf, "' não está presente para o join. O mapa de valores-t falhará."))
+    }
+     if (!("Local_R2" %in% cols_existentes_no_join_df)) {
+        warning(paste0("AVISO Bloco 9: Coluna 'Local_R2' não está presente para o join. O mapa de R² Local falhará."))
+    }
+
+    gwr_resultados_filtrados_df <- gwr_resultados_df_para_join %>%
+                                    dplyr::select(dplyr::all_of(cols_existentes_no_join_df))
+
+    # Realizar o join dos resultados do GWR com o objeto sf dos polígonos da grade.
+    # dados_gwr_sf_validos já contém as colunas originais e as transformadas log1p.
+    # Vamos selecionar explicitamente as colunas de dados_gwr_sf_validos para evitar duplicatas desnecessárias,
+    # mantendo as colunas originais de contagem (n_roubos, n_drogas) e as transformadas (log1p_n_roubos, log1p_n_drogas)
+    # para referência e análise.
+    
+    resultados_gwr_poligonos_sf <- dplyr::left_join(
+        dados_gwr_sf_validos, # Contém id_celula_grade, geometry, n_roubos, n_drogas, log1p_n_roubos, log1p_n_drogas
+        gwr_resultados_filtrados_df, # Contém id_celula_grade e resultados GWR selecionados
+        by = "id_celula_grade"
+    )
+ 
+    message("Resultados GWR combinados com os polígonos originais da grade usando 'id_celula_grade'.")
+
+    # Verificação pós-join: NAs em colunas críticas podem indicar problemas de correspondência.
+    if (any(is.na(resultados_gwr_poligonos_sf$Local_R2))) {
+        warning("NAs encontrados em 'Local_R2' após o join. Isso pode indicar problemas na correspondência dos IDs ou dados ausentes em algumas células da grade.")
+    }
+
+} else {
+    stop(paste("Número de linhas nos resultados GWR (", nrow(gwr_resultados_sdf),
+               ") não corresponde aos dados de polígonos originais (", nrow(dados_gwr_sf_validos),
+               "). Não é possível combinar os resultados de forma segura. Verifique a integridade dos dados antes do GWR ou a função de modelagem utilizada."))
+}
+
+
+# --- Visualizar os resultados ---
+message("\n--- Preparando visualizações dos resultados do GWR (modelo com variáveis log1p) ---")
+
 if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) > 0) {
     message("Iniciando a criação dos mapas de resultados GWR...")
-    # Imprimir os primeiros registros (sem geometria) para inspeção rápida dos atributos
-    # e confirmação de que os dados foram combinados corretamente.
     cat("Primeiras linhas dos resultados GWR combinados com os polígonos (atributos):\n")
     print(head(st_drop_geometry(resultados_gwr_poligonos_sf)))
     col_names_results <- names(resultados_gwr_poligonos_sf)
     message(paste("\nNomes das colunas nos resultados finais (polígonos):\n", paste(col_names_results, collapse=", ")))
 
-    # -- Mapa 1: Coeficientes Locais da variável 'n_drogas' --
-    # Este mapa revela a variação espacial da influência do tráfico de drogas (n_drogas)
-    # sobre o número de roubos (n_roubos). Um coeficiente positivo indica que um aumento
-    # no tráfico de drogas está associado a um aumento nos roubos naquela área, enquanto
-    # um coeficiente negativo sugere uma associação inversa. A magnitude do coeficiente
-    # reflete a força dessa relação local.
-    coef_col_name <- "coef_n_drogas" # Nome da coluna do coeficiente local para 'n_drogas'
-    var_independente_nome_amigavel <- "Tráfico de Drogas (n_drogas)" # Para títulos e legendas
+    # --- INÍCIO DA MODIFICAÇÃO: Atualizar nomes de colunas e display para variáveis transformadas ---
+    # var_indep_na_formula foi definido acima como all.vars(formula_gwr)[2] (ex: "log1p_n_drogas")
+    coef_col_name_plot <- novo_nome_coef_para_join # Ex: "coef_log1p_n_drogas"
+    t_val_col_name_plot <- nome_tval_original_no_sdf # Ex: "log1p_n_drogas_TV"
+    
+    var_independente_nome_amigavel <- paste0(var_indep_na_formula) # Ex: "log1p_n_drogas"
+    formula_display <- deparse(formula_gwr) # Ex: "log1p_n_roubos ~ log1p_n_drogas"
+    # --- FIM DA MODIFICAÇÃO ---
 
-    if (coef_col_name %in% col_names_results) {
-      message(paste("Criando mapa para os coeficientes locais da variável '", var_independente_nome_amigavel, "' (coluna '", coef_col_name, "')...", sep=""))
+    # -- Mapa 1: Coeficientes Locais da variável transformada --
+    if (coef_col_name_plot %in% col_names_results) {
+      message(paste("Criando mapa para os coeficientes locais da variável '", var_independente_nome_amigavel, "' (coluna '", coef_col_name_plot, "')...", sep=""))
       tryCatch({
         mapa_coef_drogas <- ggplot() +
-          # Camada dos polígonos da grade, preenchidos pelos valores do coeficiente local.
-          # `linewidth = 0.1` define uma borda fina para cada hexágono, melhorando a distinção.
-          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[coef_col_name]]), color = "grey70", linewidth = 0.1) +
-          # Camada do contorno da área de estudo para referência contextual.
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[coef_col_name_plot]]), color = "grey70", linewidth = 0.1) +
           geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
-          # Escala de cores: `viridis_c` (contínua) é altamente recomendada para dados contínuos,
-          # pois é perceptualmente uniforme (mudanças de cor correspondem a mudanças iguais nos dados)
-          # e amigável para daltônicos. `option = "viridis"` é a paleta padrão.
           scale_fill_viridis_c(name = paste0("Coeficiente Local\nEstimado para\n'", var_independente_nome_amigavel, "'"), option = "viridis") +
           labs(
             title = paste("GWR: Coeficientes Locais para", var_independente_nome_amigavel),
-            subtitle = paste0("Modelo: n_roubos ~ ", var_independente_nome_amigavel,
+            subtitle = paste0("Modelo: ", formula_display,
                               "\nLargura de banda adaptativa: ", bw_adaptativa, " vizinhos; Kernel: ", kernel_usado_para_bw),
-            caption = paste("Data da Análise:", format(Sys.Date(), "%d/%m/%Y"),
-                            "\nFonte: Dados simulados para fins de demonstração.") # Adicionado fonte
+            caption = paste("Data da Análise:", format(Sys.Date(), "%d/%m/%Y"))
           ) +
-          theme_minimal(base_size = 11) + # `theme_minimal` para um fundo limpo
+          theme_minimal(base_size = 11) + 
           theme(
-            plot.title = element_text(hjust = 0.5, face = "bold"), # Centraliza e negrita o título principal
-            plot.subtitle = element_text(hjust = 0.5, size = 9), # Centraliza o subtítulo
-            plot.caption = element_text(hjust = 1, size = 7, lineheight = 1.1), # Alinha à direita e ajusta espaçamento
-            legend.position = "right", # Posição da legenda
-            axis.text.x = element_text(angle = 45, hjust = 1, size=7), # Rotação e alinhamento dos rótulos do eixo X
-            axis.text.y = element_text(size=7) # Tamanho dos rótulos do eixo Y
+            plot.title = element_text(hjust = 0.5, face = "bold"), 
+            plot.subtitle = element_text(hjust = 0.5, size = 9), 
+            plot.caption = element_text(hjust = 1, size = 7, lineheight = 1.1), 
+            legend.position = "right", 
+            axis.text.x = element_text(angle = 45, hjust = 1, size=7), 
+            axis.text.y = element_text(size=7) 
           )
         print(mapa_coef_drogas)
-        # Salvar o mapa em um arquivo PNG com alta resolução para qualidade de impressão/visualização.
-        ggsave("mapa_coef_n_drogas_gwr.png", plot = mapa_coef_drogas, width = 8, height = 7, dpi = 300, bg = "white")
-        message(paste0("Mapa dos coeficientes locais de '", var_independente_nome_amigavel, "' salvo como mapa_coef_n_drogas_gwr.png."))
+        ggsave(paste0("mapa_coef_",var_indep_na_formula, "_gwr.png"), plot = mapa_coef_drogas, width = 8, height = 7, dpi = 300, bg = "white")
+        message(paste0("Mapa dos coeficientes locais de '", var_independente_nome_amigavel, "' salvo como mapa_coef_",var_indep_na_formula, "_gwr.png."))
       }, error = function(e_plot) {
-        # Captura e exibe erros específicos que ocorrem durante a plotagem ou salvamento.
         cat(paste("Erro ao gerar ou salvar o mapa dos coeficientes locais de '", var_independente_nome_amigavel, "':\n", e_plot$message, "\n"))
       })
     } else {
-      warning(paste0("Coluna do coeficiente '", coef_col_name, "' não encontrada nos resultados. O mapa de coeficientes não será gerado."))
+      warning(paste0("Coluna do coeficiente '", coef_col_name_plot, "' não encontrada nos resultados. O mapa de coeficientes não será gerado."))
     }
 
     # -- Mapa 2: R² Local --
-    # O R² Local indica a proporção da variância da variável dependente ('n_roubos')
-    # que é explicada pelo modelo GWR em cada localização. Valores mais altos de R²
-    # indicam um melhor ajuste do modelo naquela área. É uma medida de quão bem o modelo
-    # local explica a variação nos dados.
     r2_col_name <- "Local_R2"
     if (r2_col_name %in% col_names_results) {
       message(paste("Criando mapa para o R² Local (coluna '", r2_col_name, "')...", sep=""))
       tryCatch({
-        # Em alguns casos, o R² Local do GWR pode ser ligeiramente negativo. Isso ocorre
-        # porque o R² local é calculado com base em pesos locais e pode, matematicamente,
-        # resultar em valores negativos se o modelo local se ajustar pior do que um modelo
-        # nulo simples. Para fins de visualização, é uma prática comum truncar esses
-        # valores negativos em 0, pois um R² negativo não tem uma interpretação prática
-        # como "variância explicada".
         resultados_gwr_poligonos_sf$Local_R2_plot <- ifelse(resultados_gwr_poligonos_sf[[r2_col_name]] < 0, 0, resultados_gwr_poligonos_sf[[r2_col_name]])
-        
-        # Definir os limites para a escala de cores, garantindo que 0 e 1 (se alcançado)
-        # estejam incluídos. `max(1, ...)` garante que o limite superior da escala seja
-        # pelo menos 1, mesmo que nenhum R² local chegue a 1.
         lim_max_r2 <- max(1, max(resultados_gwr_poligonos_sf$Local_R2_plot, na.rm = TRUE))
 
         mapa_r2_local <- ggplot() +
           geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = Local_R2_plot), color = "grey70", linewidth = 0.1) +
           geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
-          # Escala de cores `plasma`: outra opção da família `viridis` que é perceptualmente
-          # uniforme e eficaz para dados contínuos.
           scale_fill_viridis_c(name = "R² Local\n(Ajuste do Modelo)", option = "plasma", limits = c(0, lim_max_r2),
-                               labels = scales::percent_format(accuracy = 1)) + # Formata a legenda como porcentagem (e.g., 0.5 vira 50%)
+                               labels = scales::percent_format(accuracy = 1)) + 
           labs(
             title = "GWR: R² Local (Poder Explicativo do Modelo)",
-            subtitle = paste0("Modelo: n_roubos ~ ", var_independente_nome_amigavel,
+            subtitle = paste0("Modelo: ", formula_display,
                               "\nLargura de banda adaptativa: ", bw_adaptativa, " vizinhos; Kernel: ", kernel_usado_para_bw),
             caption = paste("Valores de R² Local < 0 foram truncados para 0 na visualização.\nData da Análise:", format(Sys.Date(), "%d/%m/%Y"))
           ) +
@@ -640,8 +792,8 @@ if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) >
             axis.text.y = element_text(size=7)
           )
         print(mapa_r2_local)
-        ggsave("mapa_r2_local_gwr.png", plot = mapa_r2_local, width = 8, height = 7, dpi = 300, bg = "white")
-        message("Mapa do R² local salvo como mapa_r2_local_gwr.png.")
+        ggsave(paste0("mapa_r2_local_gwr_",var_indep_na_formula,".png"), plot = mapa_r2_local, width = 8, height = 7, dpi = 300, bg = "white")
+        message(paste0("Mapa do R² local salvo como mapa_r2_local_gwr_",var_indep_na_formula,".png."))
       }, error = function(e_plot) {
         cat(paste("Erro ao gerar ou salvar o mapa do R² local:\n", e_plot$message, "\n"))
       })
@@ -649,50 +801,30 @@ if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) >
       warning(paste0("Coluna '", r2_col_name, "' não encontrada nos resultados. O mapa de R² Local não será gerado."))
     }
 
-    # -- Mapa 3: Valores-t Locais do Coeficiente de 'n_drogas' --
-    # O valor-t local testa a hipótese nula de que o coeficiente local é zero.
-    # Em outras palavras, ele ajuda a determinar se a relação observada entre a
-    # variável independente e a dependente é estatisticamente significativa em
-    # cada localização.
-    # Valores de |t| (valor absoluto de t) maiores que aproximadamente 1.96 (para um
-    # nível de significância de 5% em um teste bilateral) sugerem que o coeficiente
-    # é estatisticamente diferente de zero naquela localização. Valores positivos
-    # indicam uma relação positiva significativa e valores negativos indicam uma
-    # relação negativa significativa.
-    t_val_col_name <- "n_drogas_TV" # Nome da coluna do valor-t para 'n_drogas'
-
-    if (t_val_col_name %in% col_names_results) {
-      message(paste("Criando mapa para os valores-t locais do coeficiente de '", var_independente_nome_amigavel, "' (coluna '", t_val_col_name, "')...", sep=""))
+    # -- Mapa 3: Valores-t Locais do Coeficiente da variável transformada --
+    if (t_val_col_name_plot %in% col_names_results) {
+      message(paste("Criando mapa para os valores-t locais do coeficiente de '", var_independente_nome_amigavel, "' (coluna '", t_val_col_name_plot, "')...", sep=""))
       tryCatch({
-        # Determinar os limites da escala de cores para centralizar em 0.
-        # Usar o máximo valor absoluto para tornar a escala simétrica em torno de zero,
-        # o que é crucial para escalas de cores divergentes.
-        lim_max_abs_t <- max(abs(resultados_gwr_poligonos_sf[[t_val_col_name]]), na.rm = TRUE)
-        # Fallback robusto caso `lim_max_abs_t` seja inválido (NA, Inf, ou 0).
-        # Um valor padrão como 2 é razoável, pois 1.96 é o limiar comum para significância.
+        lim_max_abs_t <- max(abs(resultados_gwr_poligonos_sf[[t_val_col_name_plot]]), na.rm = TRUE)
         if (!is.finite(lim_max_abs_t) || is.na(lim_max_abs_t) || lim_max_abs_t == 0) {
-            lim_max_abs_t <- 2 # Define um limite mínimo para a escala.
+            lim_max_abs_t <- 2 
         }
 
         mapa_t_valor_drogas <- ggplot() +
-          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[t_val_col_name]]), color = "grey70", linewidth = 0.1) +
+          geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = .data[[t_val_col_name_plot]]), color = "grey70", linewidth = 0.1) +
           geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
-          # Escala de cores divergente (`gradient2`): é ideal para valores que variam em
-          # torno de um ponto central (neste caso, 0 para valores-t). Cores diferentes
-          # são usadas para valores positivos e negativos, com uma cor neutra no ponto central.
           scale_fill_gradient2(
             name = paste0("Valor-t Local\n(", var_independente_nome_amigavel, ")"),
-            low = "blue", mid = "white", high = "red", # Cores para valores negativos, próximos de zero, e positivos
-            midpoint = 0, # O ponto central da escala é 0
-            limits = c(-lim_max_abs_t, lim_max_abs_t), # Limites simétricos para a escala
-            oob = scales::squish # `oob` (out of bounds) squishes (aperta) valores que caem
-                                 # fora dos limites definidos para dentro dos limites,
-                                 # evitando que eles sejam mapeados para cores "fora" da paleta.
+            low = "blue", mid = "white", high = "red", 
+            midpoint = 0, 
+            limits = c(-lim_max_abs_t, lim_max_abs_t), 
+            oob = scales::squish 
           ) +
           labs(
             title = paste("GWR: Significância do Coeficiente de", var_independente_nome_amigavel),
             subtitle = paste0("Valores-t locais. |t| > ~1.96 sugere significância a p < 0.05 (bilateral).",
-                              "\nLargura de banda: ", bw_adaptativa, " vizinhos; Kernel: ", kernel_usado_para_bw),
+                              "\nLargura de banda: ", bw_adaptativa, " vizinhos; Kernel: ", kernel_usado_para_bw,
+                              "\nModelo: ", formula_display),
             caption = paste("Data da Análise:", format(Sys.Date(), "%d/%m/%Y"))
           ) +
           theme_minimal(base_size = 11) +
@@ -705,91 +837,26 @@ if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) >
             axis.text.y = element_text(size=7)
           )
         print(mapa_t_valor_drogas)
-        ggsave("mapa_t_valor_n_drogas_gwr.png", plot = mapa_t_valor_drogas, width = 8, height = 7, dpi = 300, bg = "white")
-        message(paste0("Mapa dos valores-t locais de '", var_independente_nome_amigavel, "' salvo como mapa_t_valor_n_drogas_gwr.png."))
+        ggsave(paste0("mapa_t_valor_",var_indep_na_formula, "_gwr.png"), plot = mapa_t_valor_drogas, width = 8, height = 7, dpi = 300, bg = "white")
+        message(paste0("Mapa dos valores-t locais de '", var_independente_nome_amigavel, "' salvo como mapa_t_valor_",var_indep_na_formula, "_gwr.png."))
       }, error = function(e_plot) {
         cat(paste("Erro ao gerar ou salvar o mapa dos valores-t de '", var_independente_nome_amigavel, "':\n", e_plot$message, "\n"))
       })
     } else {
-      warning(paste0("Coluna do valor-t '", t_val_col_name, "' não encontrada nos resultados. O mapa de valores-t não será gerado."))
+      warning(paste0("Coluna do valor-t '", t_val_col_name_plot, "' não encontrada nos resultados. O mapa de valores-t não será gerado."))
     }
-
-    # -- Opcional: Mapa de significância (p-valores ou baseado em valor-t crítico) --
-    # Criar um mapa categórico que mostra onde o coeficiente é significativamente positivo,
-    # negativo ou não significativo pode ser muito útil para uma interpretação direta.
-    # Isso requer calcular p-valores locais ou usar um limiar para o valor-t.
-    # A significância é tipicamente avaliada comparando o valor-t observado com um
-    # valor-t crítico, que depende do nível de significância (alpha) e dos graus de liberdade (df).
-    # Para GWR, os graus de liberdade efetivos (`edf` ou `enp`) são usados no lugar dos
-    # graus de liberdade tradicionais.
-    #
-    # Para ativar este mapa, descomente o bloco de código abaixo e certifique-se de que
-    # `gwr_resultado_lista` (o resultado completo do GWR) esteja disponível.
-
-    # if (exists("gwr_resultado_lista") && !is.null(gwr_resultado_lista)) {
-    #   message("Tentando criar mapa de significância categórica...")
-    #   tryCatch({
-    #     alpha <- 0.05 # Nível de significância comum (5%)
-    #     # Calcular graus de liberdade efetivos do GWR.
-    #     # O `edf` (effective degrees of freedom) ou `enp` (effective number of parameters)
-    #     # do diagnóstico do GWR podem ser usados. A fórmula exata para df pode variar
-    #     # ligeiramente dependendo da implementação e do contexto, mas uma aproximação
-    #     # comum é `n - enp` ou `n - edf`.
-    #     # Aqui, usamos uma aproximação baseada em `gwr_resultado_lista$GW.diagnostic$edf`.
-    #     # É importante notar que a inferência em GWR pode ser complexa e esta é uma
-    #     # simplificação para fins de visualização.
-    #     df_gwr <- nrow(resultados_gwr_poligonos_sf) - gwr_resultado_lista$GW.diagnostic$edf
-    #     if (df_gwr < 1) df_gwr <- 1 # Garante que os graus de liberdade sejam pelo menos 1 para qt.
-    #
-    #     # Calcular o valor-t crítico para um teste bilateral.
-    #     # `qt(1 - alpha/2, df)` retorna o quantil t para a cauda superior.
-    #     t_critico <- qt(1 - alpha/2, df = df_gwr)
-    #     message(paste0("Valor-t crítico para alpha = ", alpha, " e df = ", round(df_gwr, 2), ": ", round(t_critico, 3)))
-    #
-    #     # Classificar cada polígono com base na significância do valor-t local.
-    #     resultados_gwr_poligonos_sf$significancia_n_drogas <- factor(
-    #        ifelse(resultados_gwr_poligonos_sf[[t_val_col_name]] > t_critico, "Positivo Significativo",
-    #               ifelse(resultados_gwr_poligonos_sf[[t_val_col_name]] < -t_critico, "Negativo Significativo", "Não Significativo")),
-    #        levels = c("Positivo Significativo", "Não Significativo", "Negativo Significativo") # Ordem para a legenda
-    #     )
-    #
-    #     mapa_significancia <- ggplot() +
-    #       geom_sf(data = resultados_gwr_poligonos_sf, aes(fill = significancia_n_drogas), color = "grey70", linewidth = 0.1) +
-    #       geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
-    #       scale_fill_manual(
-    #         name = paste0("Significância Local\n(", var_independente_nome_amigavel, ")"),
-    #         values = c("Positivo Significativo" = "darkgreen", "Não Significativo" = "lightgrey", "Negativo Significativo" = "darkred"),
-    #         na.value = "white" # Cor para valores NA, se houver
-    #       ) +
-    #       labs(
-    #         title = paste("GWR: Significância Categórica do Coeficiente de", var_independente_nome_amigavel),
-    #         subtitle = paste0("Baseado em valores-t locais e alpha = ", alpha, ".\nLargura de banda: ", bw_adaptativa, " vizinhos; Kernel: ", kernel_usado_para_bw),
-    #         caption = paste("Data da Análise:", format(Sys.Date(), "%d/%m/%Y"))
-    #       ) +
-    #       theme_minimal(base_size = 11) +
-    #       theme(
-    #         plot.title = element_text(hjust = 0.5, face = "bold"),
-    #         plot.subtitle = element_text(hjust = 0.5, size = 9, lineheight = 0.9),
-    #         plot.caption = element_text(hjust = 1, size = 7),
-    #         legend.position = "right",
-    #         axis.text.x = element_text(angle = 45, hjust = 1, size=7),
-    #         axis.text.y = element_text(size=7)
-    #       )
-    #     print(mapa_significancia)
-    #     ggsave("mapa_significancia_n_drogas_gwr.png", plot = mapa_significancia, width = 8, height = 7, dpi = 300, bg = "white")
-    #     message(paste0("Mapa de significância categórica de '", var_independente_nome_amigavel, "' salvo como mapa_significancia_n_drogas_gwr.png."))
-    #   }, error = function(e_plot) {
-    #     cat(paste("Erro ao gerar ou salvar o mapa de significância categórica de '", var_independente_nome_amigavel, "':\n", e_plot$message, "\n"))
-    #   })
-    # } else {
-    #   warning("Objeto 'gwr_resultado_lista' não encontrado ou vazio. O mapa de significância categórica não será gerado.")
-    # }
+    
+    # Mapa de significância opcional (precisaria ser ajustado para usar t_val_col_name_plot e formula_display)
+    # ...
 
 } else {
     message("Nenhum resultado GWR válido (resultados_gwr_poligonos_sf) para plotar. Verifique as etapas anteriores da análise.")
 }
 
-message("\n--- Análise GWR com grade hexagonal e visualizações concluídas ---")
+message("\n--- Análise GWR (modelo com variáveis log1p) com grade hexagonal e visualizações concluídas ---")
+# ```
+
+# (O script continua com os Blocos 10 e 11)
 
 ```
 
@@ -815,23 +882,23 @@ if (!is.null(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) >
 
 
 ```{r}
-# --- Bloco 10: Resumo dos Parâmetros, Resultados e Inferência do Modelo GWR ---
-cat("\n\n--- Bloco 10: Resumo dos Parâmetros, Resultados e Inferência do Modelo GWR ---\n")
+
+# --- Bloco 10: Resumo dos Parâmetros, Resultados e Inferência do Modelo GWR (com log1p e Análise de Resíduos) ---
+cat("\n\n--- Bloco 10: Resumo dos Parâmetros, Resultados e Inferência do Modelo GWR (com variáveis transformadas log1p e Análise de Resíduos) ---")
 
 # Verificar se os resultados e variáveis necessários existem antes de prosseguir.
 if (!exists("gwr_resultado_lista") || is.null(gwr_resultado_lista) ||
     !exists("resultados_gwr_poligonos_sf") || is.null(resultados_gwr_poligonos_sf) || nrow(resultados_gwr_poligonos_sf) == 0 ||
     !exists("formula_gwr") || !exists("bw_adaptativa") || !exists("kernel_usado_para_bw") || !exists("dados_spdf_gwr")) {
-    cat("AVISO: Um ou mais objetos/variáveis necessários ('gwr_resultado_lista', 'resultados_gwr_poligonos_sf', 'formula_gwr', 'bw_adaptativa', 'kernel_usado_para_bw', 'dados_spdf_gwr') não foram encontrados ou estão vazios.\n")
+    cat("AVISO: Um ou mais objetos/variáveis necessários não foram encontrados ou estão vazios.\n")
     cat("O resumo detalhado do GWR não pode ser gerado. Por favor, execute as etapas anteriores do script.\n")
 } else {
     # Seção 1: Parâmetros do Modelo GWR Utilizado
     cat("\n## 1. Parâmetros do Modelo GWR Utilizado ##\n")
     cat("--------------------------------------------\n")
-    cat(paste("Fórmula do Modelo:", deparse(formula_gwr), "\n"))
+    cat(paste("Fórmula do Modelo:", deparse(formula_gwr), "\n")) 
     cat(paste("Largura de Banda (Adaptativa):", bw_adaptativa, "vizinhos\n"))
     cat("  -> A largura de banda adaptativa indica que, para cada ponto de calibração (célula da grade), o modelo considerou os ", bw_adaptativa, " vizinhos mais próximos.\n")
-    cat("     Este método é preferível em áreas onde a densidade de dados varia, garantindo um número mínimo de observações para cada calibração local.\n")
     cat(paste("Função Kernel:", kernel_usado_para_bw, "\n"))
     if (kernel_usado_para_bw == "gaussian") {
         cat("  -> A função kernel 'gaussian' atribui pesos que decaem suavemente com a distância, sem atingir zero abruptamente.\n")
@@ -840,31 +907,38 @@ if (!exists("gwr_resultado_lista") || is.null(gwr_resultado_lista) ||
     } else {
         cat(paste0("  -> A função kernel '", kernel_usado_para_bw, "' define o peso das observações vizinhas na calibração do modelo local.\n"))
     }
-    cat(paste("Número de Pontos de Calibração (Células da Grade):", nrow(dados_spdf_gwr), "\n"))
+    cat(paste("Modelo GWR Assumido: Gaussiano (implícito para dados contínuos transformados log1p).\n")) 
+    cat(paste("Número de Pontos de Calibração (Células da Grade):", length(dados_spdf_gwr), "\n")) # length() para SPDF é o número de feições
     cat("  -> Cada um desses pontos representa o centroide de uma célula da grade onde um modelo de regressão local foi ajustado.\n")
-    if (!is.null(st_crs(resultados_gwr_poligonos_sf)$input)) {
-        cat(paste("CRS dos Dados:", st_crs(resultados_gwr_poligonos_sf)$input, "\n"))
-    } else if (!is.null(st_crs(resultados_gwr_poligonos_sf)$wkt)) {
-        cat(paste("CRS dos Dados (WKT):", substr(st_crs(resultados_gwr_poligonos_sf)$wkt, 1, 60), "...\n")) # Mostra parte do WKT
+    
+    crs_info <- tryCatch(st_crs(resultados_gwr_poligonos_sf), error = function(e) NULL)
+    if (!is.null(crs_info)) {
+        if (!is.na(crs_info$epsg)) {
+            cat(paste("CRS dos Dados: EPSG:", crs_info$epsg, "\n"))
+        } else if (!is.null(crs_info$input) && crs_info$input != "") {
+            cat(paste("CRS dos Dados (Input String):", crs_info$input, "\n"))
+        } else if (!is.null(crs_info$wkt) && crs_info$wkt != "") {
+            cat(paste("CRS dos Dados (WKT):", substr(crs_info$wkt, 1, 70), "...\n"))
+        } else {
+            cat("CRS dos Dados: Não especificado ou não recuperável claramente dos resultados.\n")
+        }
     } else {
-        cat("CRS dos Dados: Não especificado ou não recuperável dos resultados.\n")
+        cat("CRS dos Dados: Não foi possível obter a informação do CRS dos resultados.\n")
     }
     cat("  -> O Sistema de Coordenadas de Referência é crucial para garantir que as distâncias sejam calculadas corretamente.\n")
 
-    # Função auxiliar para imprimir diagnósticos de forma robusta
     print_diagnostic <- function(value, name, description, decimal_places = 2) {
         if (!is.null(value) && is.numeric(value) && is.finite(value)) {
             cat(paste0(name, ": ", round(value, decimal_places), "\n"))
             cat(paste0("  -> ", description, "\n"))
         } else {
             cat(paste0(name, ": Não disponível ou inválido (Valor: '", as.character(value), "').\n"))
-            cat(paste0("  -> ", description, "\n")) # Manter a descrição
         }
     }
 
     # Seção 2: Diagnósticos Globais do Modelo GWR
-    cat("\n## 2. Diagnósticos Globais do Modelo GWR ##\n")
-    cat("-------------------------------------------\n")
+    cat("\n## 2. Diagnósticos Globais do Modelo GWR (para variáveis transformadas log1p) ##\n") 
+    cat("----------------------------------------------------------------------------------\n")
     if (!is.null(gwr_resultado_lista$GW.diagnostic)) {
         diagnostics <- gwr_resultado_lista$GW.diagnostic
 
@@ -872,59 +946,66 @@ if (!exists("gwr_resultado_lista") || is.null(gwr_resultado_lista) ||
                          "Métrica de qualidade de ajuste que equilibra o ajuste e a complexidade. Valores menores são preferíveis.")
         print_diagnostic(diagnostics$AICc, "AICc (Akaike Information Criterion Corrigido)",
                          "Versão do AIC ajustada para amostras pequenas, frequentemente preferível em GWR. Valores menores são preferíveis.")
-        print_diagnostic(diagnostics$BIC, "BIC (Bayesian Information Criterion)",
+        
+        if ("BIC" %in% names(diagnostics)) {
+             print_diagnostic(diagnostics$BIC, "BIC (Bayesian Information Criterion)", 
                          "Similar ao AIC, mas com penalidade maior para complexidade. Favorece modelos mais parcimoniosos.")
-        print_diagnostic(diagnostics$enp, "ENP (Effective Number of Parameters)",
+        } else {
+            cat("BIC (Bayesian Information Criterion): Não disponível nos diagnósticos do modelo.\n")
+        }
+        
+        print_diagnostic(diagnostics$ENP, "ENP (Effective Number of Parameters)",
                          "Reflete a complexidade efetiva do modelo GWR. Geralmente maior que em OLS devido à variação local dos coeficientes.")
-        print_diagnostic(diagnostics$edf, "EDF (Effective Degrees of Freedom)",
+        print_diagnostic(diagnostics$EDF, "EDF (Effective Degrees of Freedom)",
                          "Representa os graus de liberdade efetivos (n - ENP). Usado em cálculos de significância.")
 
-        if (!is.null(diagnostics$RSS.gw) && is.numeric(diagnostics$RSS.gw) && is.finite(diagnostics$RSS.gw) &&
-            !is.null(diagnostics$edf) && is.numeric(diagnostics$edf) && is.finite(diagnostics$edf) && diagnostics$edf > 0) {
-            sigma_calculado <- sqrt(diagnostics$RSS.gw / diagnostics$edf)
-            print_diagnostic(sigma_calculado, "Sigma (Estimativa do Desvio Padrão dos Resíduos - Calculado)",
-                             "Desvio padrão dos erros do modelo. Indica a dispersão dos resíduos. Valores menores indicam melhor ajuste.")
-        } else {
-            cat("Sigma (Estimativa do Desvio Padrão dos Resíduos - Calculado): Não foi possível calcular (RSS.gw ou edf ausente/inválido ou edf <= 0).\n")
-            cat("  -> Desvio padrão dos erros do modelo. Indica a dispersão dos resíduos. Valores menores indicam melhor ajuste.\n")
-        }
+        rss_gwr <- if (!is.null(diagnostics$RSS.gw)) diagnostics$RSS.gw else if (!is.null(diagnostics$RSS)) diagnostics$RSS else NA
+        sigma_gwr <- if(!is.null(diagnostics$Sigma.gw)) diagnostics$Sigma.gw else if (!is.null(diagnostics$Sigma)) diagnostics$Sigma else NA
 
-        print_diagnostic(diagnostics$RSS.gw, "RSS.gw (Residual Sum of Squares - GWR)",
-                         "Soma dos quadrados das diferenças entre valores observados e previstos. Valores menores indicam melhor ajuste.")
-        print_diagnostic(diagnostics$gw.R2, "R² do GWR (gw.R2)",
-                         "Proporção da variância total da variável dependente explicada globalmente pelo modelo GWR. Entre 0 e 1.", decimal_places = 4)
-        print_diagnostic(diagnostics$gwR2.adj, "R² Ajustado do GWR (gwR2.adj)",
-                         "Versão do R² que penaliza preditores adicionais que não melhoram significativamente o ajuste.", decimal_places = 4)
+        print_diagnostic(sigma_gwr, "Sigma (Estimativa do Desvio Padrão dos Resíduos)",
+                         "Desvio padrão dos erros do modelo (na escala log1p). Indica a dispersão dos resíduos. Valores menores indicam melhor ajuste.", decimal_places = 4)
+        print_diagnostic(rss_gwr, "RSS (Residual Sum of Squares - GWR)",
+                         "Soma dos quadrados das diferenças entre valores observados e previstos (na escala log1p). Valores menores indicam melhor ajuste.")
+        
+        r2_gwr_global <- if (!is.null(diagnostics$gw.R2)) diagnostics$gw.R2 else if (!is.null(diagnostics$R2.gwr)) diagnostics$R2.gwr else NA
+        r2_adj_gwr_global <- if (!is.null(diagnostics$gwR2.adj)) diagnostics$gwR2.adj else if (!is.null(diagnostics$R2.adj.gwr)) diagnostics$R2.adj.gwr else NA
 
-        cat("\n--- Verificação do R² Global (Calculado manualmente) ---\n")
+        print_diagnostic(r2_gwr_global, "R² do GWR (Global)",
+                         "Proporção da variância total da variável dependente transformada (log1p) explicada globalmente pelo modelo GWR.", decimal_places = 4)
+        print_diagnostic(r2_adj_gwr_global, "R² Ajustado do GWR (Global)",
+                         "Versão do R² que penaliza preditores adicionais que não melhoram significativamente o ajuste (na escala log1p).", decimal_places = 4)
+
+        cat("\n--- Verificação do R² Global (Calculado manualmente na escala log1p) ---\n")
         if ("y" %in% names(gwr_resultado_lista$SDF) && "yhat" %in% names(gwr_resultado_lista$SDF)) {
-            y_observado <- gwr_resultado_lista$SDF$y
-            y_predito_gwr <- gwr_resultado_lista$SDF$yhat
-            if(is.numeric(y_observado) && is.numeric(y_predito_gwr) &&
-               all(is.finite(y_observado)) && all(is.finite(y_predito_gwr)) &&
-               length(y_observado) == length(y_predito_gwr) && length(y_observado) > 1) {
-                sst <- sum((y_observado - mean(y_observado, na.rm = TRUE))^2)
-                ssr <- sum((y_observado - y_predito_gwr)^2)
-                if (sst > 0) { # Evitar divisão por zero se todos os y_observado forem iguais
-                    r_squared_gwr_global_manual <- 1 - (ssr / sst)
-                    cat(paste("R² Global (Calculado manualmente):", round(r_squared_gwr_global_manual, 4), "\n"))
-                    cat("  -> Métrica de ajuste geral. Deve ser similar ao 'gw.R2' do pacote.\n")
+            y_observado_log1p <- gwr_resultado_lista$SDF$y
+            y_predito_gwr_log1p <- gwr_resultado_lista$SDF$yhat
+            if(is.numeric(y_observado_log1p) && is.numeric(y_predito_gwr_log1p) &&
+               all(is.finite(y_observado_log1p)) && all(is.finite(y_predito_gwr_log1p)) &&
+               length(y_observado_log1p) == length(y_predito_gwr_log1p) && length(y_observado_log1p) > 1) {
+                
+                sst_log1p <- sum((y_observado_log1p - mean(y_observado_log1p, na.rm = TRUE))^2, na.rm = TRUE)
+                ssr_log1p <- sum((y_observado_log1p - y_predito_gwr_log1p)^2, na.rm = TRUE) 
+                
+                if (!is.na(sst_log1p) && sst_log1p > 1e-9) { 
+                    r_squared_gwr_global_manual_log1p <- 1 - (ssr_log1p / sst_log1p)
+                    cat(paste("R² Global (Calculado manualmente na escala log1p):", round(r_squared_gwr_global_manual_log1p, 4), "\n"))
+                    cat("  -> Métrica de ajuste geral. Deve ser similar ao R² do GWR (Global) reportado pelo pacote.\n")
                 } else {
-                    cat("R² Global (Calculado manualmente): Não calculado (variância da variável dependente é zero).\n")
+                    cat("R² Global (Calculado manualmente na escala log1p): Não calculado (SST é zero, NA ou muito próximo de zero).\n")
                 }
             } else {
-                cat("R² Global (Calculado manualmente): Não calculado ('y' ou 'yhat' com dados inválidos/insuficientes).\n")
+                cat("R² Global (Calculado manualmente na escala log1p): Não calculado ('y' ou 'yhat' com dados inválidos/insuficientes).\n")
             }
         } else {
-            cat("R² Global (Calculado manualmente): Não calculado ('y' ou 'yhat' não encontrados no SDF do GWR).\n")
+            cat("R² Global (Calculado manualmente na escala log1p): Não calculado ('y' ou 'yhat' não encontrados no SDF do GWR).\n")
         }
     } else {
         cat("Diagnósticos globais (gwr_resultado_lista$GW.diagnostic) não disponíveis. Verifique a saída do modelo GWR.\n")
     }
 
-    # Seção 3: Análise dos Coeficientes Locais e Significância
-    cat("\n## 3. Análise dos Coeficientes Locais e Significância ##\n")
-    cat("-----------------------------------------------------\n")
+    # Seção 3: Análise dos Coeficientes Locais e Significância (na escala log1p)
+    cat("\n## 3. Análise dos Coeficientes Locais e Significância (na escala log1p) ##\n") 
+    cat("--------------------------------------------------------------------------\n")
 
     print_summary_stats <- function(data_vector, name) {
         cat(paste("\nResumo Estatístico para '", name, "':\n", sep=""))
@@ -935,106 +1016,193 @@ if (!exists("gwr_resultado_lista") || is.null(gwr_resultado_lista) ||
         }
     }
 
-    var_dependente_nome <- all.vars(formula_gwr)[1] # Assume que é o primeiro da fórmula
-    var_indep_nomes <- all.vars(formula_gwr)[-1]   # Restantes
+    var_dependente_formula_nome <- all.vars(formula_gwr)[1] 
+    vars_independentes_formula_nomes <- all.vars(formula_gwr)[-1]   
     
-    # Intercepto
     if ("Intercept" %in% names(resultados_gwr_poligonos_sf)) {
         print_summary_stats(resultados_gwr_poligonos_sf$Intercept, "Intercepto Local")
-        cat(paste0("  -> Valor esperado de '", var_dependente_nome, "' quando todas as VIs são zero, variando localmente.\n"))
+        cat(paste0("  -> Valor esperado de '", var_dependente_formula_nome, "' quando todas as VIs (transformadas) são zero, variando localmente.\n"))
     } else {
          cat("\nResumo Estatístico para 'Intercepto Local': Coluna 'Intercept' não encontrada.\n")
     }
 
-    # Coeficientes das Variáveis Independentes
-    # (Este exemplo foca em 'n_drogas' como única VI, conforme o contexto anterior)
-    # Para múltiplas VIs, este loop precisaria ser adaptado ou expandido.
-    
-    # Assumindo que a VI principal é 'n_drogas' e seu coeficiente é 'coef_n_drogas'
-    # e valor-t é 'n_drogas_TV' conforme o script anterior.
-    # Se houver mais VIs, um loop seria ideal aqui.
-    
-    coef_var_indep_nome_col <- "coef_n_drogas" # Nome da coluna do *coeficiente* no SDF
-    var_indep_nome_formula <- "n_drogas"      # Nome da VI na *fórmula*
-    var_indep_desc <- paste("Variável Independente ('", var_indep_nome_formula, "')", sep="") # Descrição
-    
-    if (coef_var_indep_nome_col %in% names(resultados_gwr_poligonos_sf)) {
-        print_summary_stats(resultados_gwr_poligonos_sf[[coef_var_indep_nome_col]], paste("Coeficiente Local de", var_indep_desc))
-        cat(paste0("  -> Relação local entre '", var_indep_nome_formula, "' e '", var_dependente_nome, "'. Variação indica não estacionariedade.\n"))
-    } else {
-        cat(paste0("\nResumo para 'Coeficiente Local de ", var_indep_desc, "': Coluna '", coef_var_indep_nome_col, "' não encontrada.\n"))
-    }
-
-    t_val_col_name_vi <- paste0(var_indep_nome_formula, "_TV") # e.g., n_drogas_TV
-    if (t_val_col_name_vi %in% names(resultados_gwr_poligonos_sf)) {
-        print_summary_stats(resultados_gwr_poligonos_sf[[t_val_col_name_vi]], paste("Valor-t Local de", var_indep_desc))
-        cat(paste0("  -> Testa significância do coeficiente local de '", var_indep_nome_formula, "'. |t| > ~1.96 sugere significância (p < 0.05).\n"))
+    for (vi_nome in vars_independentes_formula_nomes) {
+        coef_vi_col_nome <- paste0("coef_", vi_nome) 
+        tval_vi_col_nome <- paste0(vi_nome, "_TV")    
+        vi_desc <- paste0("Variável Independente ('", vi_nome, "')")
         
-        t_values_vi <- resultados_gwr_poligonos_sf[[t_val_col_name_vi]]
-        if(!is.null(t_values_vi) && is.numeric(t_values_vi)){
-            t_values_vi_valid <- t_values_vi[!is.na(t_values_vi)]
-            if(length(t_values_vi_valid) > 0){
-                significant_positive_vi <- sum(t_values_vi_valid > 1.96, na.rm = TRUE)
-                significant_negative_vi <- sum(t_values_vi_valid < -1.96, na.rm = TRUE)
-                total_significant_vi <- significant_positive_vi + significant_negative_vi
-                percent_significant_vi <- (total_significant_vi / length(t_values_vi_valid)) * 100
-                cat(paste0("     ~", round(percent_significant_vi, 1), "% dos coeficientes locais para '", var_indep_nome_formula, "' são significativos (|t| > 1.96).\n"))
-                cat(paste0("       - Positivamente Sig.: ", significant_positive_vi, " (", round(significant_positive_vi/length(t_values_vi_valid)*100,1), "%)\n"))
-                cat(paste0("       - Negativamente Sig.: ", significant_negative_vi, " (", round(significant_negative_vi/length(t_values_vi_valid)*100,1), "%)\n"))
+        if (coef_vi_col_nome %in% names(resultados_gwr_poligonos_sf)) {
+            print_summary_stats(resultados_gwr_poligonos_sf[[coef_vi_col_nome]], paste("Coeficiente Local de", vi_desc))
+            cat(paste0("  -> Relação local entre '", vi_nome, "' e '", var_dependente_formula_nome, "'. Variação indica não estacionariedade.\n"))
+            cat(paste0("     Interpretação: uma mudança de 1 unidade em '", vi_nome, "' está associada a uma mudança de [coeficiente] unidades em '", var_dependente_formula_nome, "', localmente.\n"))
+        } else {
+            cat(paste0("\nResumo para 'Coeficiente Local de ", vi_desc, "': Coluna '", coef_vi_col_nome, "' não encontrada.\n"))
+        }
+
+        if (tval_vi_col_nome %in% names(resultados_gwr_poligonos_sf)) {
+            print_summary_stats(resultados_gwr_poligonos_sf[[tval_vi_col_nome]], paste("Valor-t Local de", vi_desc))
+            cat(paste0("  -> Testa significância do coeficiente local de '", vi_nome, "'. |t| > ~1.96 sugere significância (p < 0.05).\n"))
+            
+            t_values_vi <- resultados_gwr_poligonos_sf[[tval_vi_col_nome]]
+            if(!is.null(t_values_vi) && is.numeric(t_values_vi)){
+                t_values_vi_valid <- t_values_vi[!is.na(t_values_vi)]
+                if(length(t_values_vi_valid) > 0){
+                    significant_positive_vi <- sum(t_values_vi_valid > 1.96, na.rm = TRUE)
+                    significant_negative_vi <- sum(t_values_vi_valid < -1.96, na.rm = TRUE)
+                    total_significant_vi <- significant_positive_vi + significant_negative_vi
+                    percent_significant_vi <- (total_significant_vi / length(t_values_vi_valid)) * 100
+                    cat(paste0("     ~", round(percent_significant_vi, 1), "% dos coeficientes locais para '", vi_nome, "' são significativos (|t| > 1.96).\n"))
+                    cat(paste0("       - Positivamente Sig.: ", significant_positive_vi, " (", round(significant_positive_vi/length(t_values_vi_valid)*100,1), "%)\n"))
+                    cat(paste0("       - Negativamente Sig.: ", significant_negative_vi, " (", round(significant_negative_vi/length(t_values_vi_valid)*100,1), "%)\n"))
+                } else {
+                     cat(paste0("     Não foi possível calcular % de significância para '", vi_nome, "' (valores-t são NA/vazios).\n"))
+                }
             } else {
-                 cat(paste0("     Não foi possível calcular % de significância para '", var_indep_nome_formula, "' (valores-t são NA/vazios).\n"))
+                cat(paste0("     Dados de valor-t para '", vi_nome, "' não numéricos ou NULL.\n"))
             }
         } else {
-            cat(paste0("     Dados de valor-t para '", var_indep_nome_formula, "' não numéricos ou NULL.\n"))
+            cat(paste0("\nResumo para 'Valor-t Local de ", vi_desc, "': Coluna '", tval_vi_col_nome, "' não encontrada.\n"))
         }
-    } else {
-        cat(paste0("\nResumo para 'Valor-t Local de ", var_indep_desc, "': Coluna '", t_val_col_name_vi, "' não encontrada.\n"))
     }
 
-    # R² Local
     local_r2_col_name <- if ("Local_R2_plot" %in% names(resultados_gwr_poligonos_sf)) "Local_R2_plot" else "Local_R2"
     if (local_r2_col_name %in% names(resultados_gwr_poligonos_sf)) {
         print_summary_stats(resultados_gwr_poligonos_sf[[local_r2_col_name]], paste0("R² Local (usando '", local_r2_col_name, "')"))
-        cat(paste0("  -> Proporção da variância de '", var_dependente_nome, "' explicada localmente. Variação indica não estacionariedade no ajuste.\n"))
+        cat(paste0("  -> Proporção da variância de '", var_dependente_formula_nome, "' explicada localmente. Variação indica não estacionariedade no ajuste.\n"))
         if("Local_R2" %in% names(resultados_gwr_poligonos_sf) && any(resultados_gwr_poligonos_sf$Local_R2 < 0, na.rm=TRUE)){
-             cat("     Nota: Valores de R² Local originais < 0 indicam ajuste local pior que a média. Podem ter sido ajustados para visualização.\n")
+             cat("     Nota: Valores de R² Local originais < 0 indicam ajuste local pior que a média. Podem ter sido ajustados para visualização (no Bloco 9).\n")
         }
     } else {
         cat("\nResumo Estatístico para 'R² Local': Coluna 'Local_R2' ou 'Local_R2_plot' não encontrada.\n")
     }
 
-    # Seção 4: Inferência e Conclusões Preliminares
-    cat("\n## 4. Inferência e Conclusões Preliminares ##\n")
-    cat("----------------------------------------------\n")
-    cat("A análise GWR explora a variação espacial das relações, superando a média global. Inferências principais:\n\n")
+    # Seção 4: Inferência e Conclusões Preliminares (para variáveis transformadas log1p)
+    cat("\n## 4. Inferência e Conclusões Preliminares (para variáveis transformadas log1p) ##\n") 
+    cat("------------------------------------------------------------------------------------\n")
+    cat("A análise GWR explora a variação espacial das relações. Com a transformação log1p, as interpretações são na escala logarítmica.\n")
+    cat("Inferências principais:\n\n")
+
+    vi_principal_nome <- vars_independentes_formula_nomes[1] 
 
     cat("  A. Não Estacionariedade Espacial:\n")
     cat(paste0("     - Principal achado: identificação de não estacionariedade. Variação ampla nos coeficientes locais\n"))
-    cat(paste0("       (especialmente para '", var_indep_nome_formula, "') sugere que sua relação com '", var_dependente_nome, "' não é constante no espaço.\n"))
-    cat("       Esta é a vantagem chave sobre modelos globais (OLS).\n")
+    cat(paste0("       (especialmente para '", vi_principal_nome, "') sugere que sua relação com '", var_dependente_formula_nome, "' não é constante no espaço.\n"))
+    cat("       Esta é a vantagem chave sobre modelos globais (OLS) que assumem uma relação constante.\n")
     cat("     - Variação no R² Local também indica não estacionariedade: o poder explicativo do modelo difere espacialmente.\n\n")
 
-    cat("  B. Natureza da Relação Local:\n")
-    cat(paste0("     - Mapas de coeficientes locais (Etapa 9, se gerados) visualizam *onde* a relação é positiva, negativa ou nula.\n"))
-    cat(paste0("       Pode haver áreas com associação forte entre '", var_indep_nome_formula, "' e '", var_dependente_nome, "', e outras com relação fraca/inversa.\n"))
-    cat("     - Mapas de valores-t indicam *onde* as relações são estatisticamente significativas. Focar nestas áreas para interpretações confiáveis.\n\n")
+    cat("  B. Natureza da Relação Local (Escala Logarítmica):\n")
+    cat(paste0("     - Mapas de coeficientes locais (Bloco 9) visualizam *onde* a relação é positiva, negativa ou próxima de zero.\n"))
+    cat(paste0("       Um coeficiente local positivo para '", vi_principal_nome, "' indica que um aumento em '", vi_principal_nome, "' (que é log(1 + ocorrências de drogas))\n"))
+    cat(paste0("       está associado a um aumento em '", var_dependente_formula_nome, "' (que é log(1 + nº roubos)) naquela área específica.\n"))
+    cat("       A magnitude do coeficiente reflete a força dessa associação local na escala logarítmica.\n")
+    cat("     - Mapas de valores-t indicam *onde* as relações observadas são estatisticamente significativas, ou seja, improváveis de terem ocorrido ao acaso.\n\n")
 
-    cat(paste0("  C. Implicações Práticas (Exemplo para '",var_dependente_nome,"' e '",var_indep_nome_formula,"'):\n"))
-    cat(paste0("     - Se GWR mostra relação forte e positiva em 'hotspots' de '",var_dependente_nome,"', intervenções focadas em '",var_indep_nome_formula,"' nessas áreas podem ser eficazes.\n"))
-    cat("       Em áreas com relação fraca/nula, outras causas para '",var_dependente_nome,"' devem ser investigadas, adaptando políticas localmente.\n")
-    cat("     - Variação na relação pode indicar fatores contextuais omitidos (pobreza, policiamento) influenciando '",var_dependente_nome,"' de formas distintas.\n\n")
+    cat(paste0("  C. Implicações Práticas (Exemplo para '",var_dependente_formula_nome,"' e '",vi_principal_nome,"'):\n"))
+    cat(paste0("     - Se o GWR mostra uma relação positiva forte e significativa em certas áreas ('hotspots' de '",var_dependente_formula_nome,"'),\n"))
+    cat(paste0("       isso sugere que fatores relacionados a '", vi_principal_nome, "' (na escala original, 'n_drogas') são particularmente relevantes\n"))
+    cat(paste0("       para explicar '",var_dependente_formula_nome,"' (na escala original, 'n_roubos') nessas localidades.\n"))
+    cat("       Intervenções direcionadas podem ser mais eficazes nessas áreas.\n")
+    cat(paste0("     - Em áreas com relação fraca, nula ou negativa, outros fatores não incluídos no modelo podem ser mais importantes para explicar '",var_dependente_formula_nome,"'.\n"))
+    cat(paste0("     - **Importante sobre interpretação de log-log:** Um coeficiente de, por exemplo, 0.5 para '", vi_principal_nome, "' significa que um aumento de 1% em (1 + n_drogas)\n"))
+    cat(paste0("       está associado a um aumento de aproximadamente 0.5% em (1 + n_roubos), localmente. Esta é uma interpretação de elasticidade.\n"))
+    cat("       Para interpretações mais diretas na escala original, pode ser necessário reverter a transformação dos valores preditos ou simular cenários.\n\n")
 
     cat("  D. Limitações e Próximos Passos:\n")
-    cat("     - **Sensibilidade:** GWR é sensível à largura de banda e kernel. Explore a sensibilidade.\n")
-    cat("     - **Multicolinearidade Local:** Pode instabilizar coeficientes locais. Verifique VIF local.\n")
-    cat(paste0("     - **Complexidade:** Modelo com uma VI ('", var_indep_nome_formula, "'). Múltiplas VIs podem enriquecer, mas aumentam risco de multicolinearidade.\n"))
-    cat("     - **Validação:** Compare com outros modelos, use validação cruzada, incorpore conhecimento da área.\n")
-    cat("     - **Análise de Resíduos:** Verifique autocorrelação espacial e homocedasticidade dos resíduos. Padrões podem indicar variáveis omitidas.\n\n")
+    cat("     - **Sensibilidade à Especificação:** GWR é sensível à escolha da largura de banda, kernel e forma funcional (transformações).\n")
+    cat("       Explore a sensibilidade dos resultados a essas escolhas.\n")
+    cat("     - **Multicolinearidade Local:** Pode instabilizar coeficientes locais, especialmente com múltiplas VIs. Verifique VIFs locais se aplicável.\n")
+    cat(paste0("     - **Complexidade do Modelo:** Este modelo usa uma VI transformada ('", vi_principal_nome, "'). Adicionar mais VIs pode enriquecer a análise,\n"))
+    cat("       mas também aumenta o risco de multicolinearidade e a complexidade da interpretação.\n")
+    cat("     - **Validação:** Compare os resultados com outros modelos espaciais ou não espaciais. Considere validação cruzada espacial.\n")
+    cat("     - **Análise de Resíduos:** (Ver Seção 5 abaixo para I de Moran Global dos Resíduos).\n") # Modificado para referenciar a Seção 5
+    cat("       Padrões nos resíduos podem indicar variáveis omitidas importantes ou problemas na especificação do modelo.\n\n")
 
-    cat("Interprete estes resultados no contexto da sua pesquisa e dados. Mapas (se gerados) são essenciais para complementar este resumo.\n")
-}
+    cat("Interprete estes resultados no contexto da sua área de estudo, conhecimento teórico e dos dados. Os mapas gerados no Bloco 9 são essenciais para complementar este resumo textual.\n")
 
-cat("\n--- Fim do Bloco 10: Resumo GWR ---\n")
+    # --- INÍCIO DA SEÇÃO 5: ANÁLISE DE AUTOCORRELAÇÃO ESPACIAL DOS RESÍDUOS ---
+    cat("\n## 5. Análise de Autocorrelação Espacial dos Resíduos (I de Moran Global) ##\n")
+    cat("--------------------------------------------------------------------------------\n")
+    cat("Verificar a autocorrelação espacial nos resíduos do GWR é importante.\n")
+    cat("Resíduos espacialmente correlacionados podem indicar que o modelo GWR não capturou toda a estrutura espacial,\n")
+    cat("ou que variáveis espaciais importantes foram omitidas.\n\n")
+
+    if ("residual" %in% names(resultados_gwr_poligonos_sf) && nrow(resultados_gwr_poligonos_sf) > 0) {
+        residuos_gwr <- resultados_gwr_poligonos_sf$residual
+        message("\nCalculando vizinhança para o teste de Moran dos resíduos...")
+        vizinhos_listw <- NULL
+        tryCatch({
+            nb_queen <- spdep::poly2nb(resultados_gwr_poligonos_sf, queen = TRUE)
+            num_sem_vizinhos <- sum(card(nb_queen) == 0)
+            if (num_sem_vizinhos > 0) {
+                message(paste("Aviso: Encontrados", num_sem_vizinhos, "polígonos sem vizinhos (ilhas) para o teste de Moran."))
+            }
+            vizinhos_listw <- spdep::nb2listw(nb_queen, style = "W", zero.policy = TRUE) 
+            message("Matriz de pesos espaciais (listw) para resíduos criada com sucesso.")
+        }, error = function(e_nb) {
+            message(paste("Erro ao criar a matriz de vizinhança para os resíduos:", e_nb$message))
+            cat("Não foi possível calcular o I de Moran para os resíduos devido a erro na criação da matriz de vizinhança.\n")
+        })
+
+        if (!is.null(vizinhos_listw)) {
+            message("Calculando o I de Moran Global para os resíduos do GWR...")
+            teste_moran_residuos <- NULL
+            tryCatch({
+                # Verificar se há NAs nos resíduos
+                if(any(is.na(residuos_gwr))){
+                    message(paste("Aviso:", sum(is.na(residuos_gwr)), "valores NA encontrados nos resíduos. Tentando removê-los para o teste de Moran."))
+                }
+                
+                # O moran.test lida com NAs através do na.action, mas é bom estar ciente.
+                # Se zero.policy=TRUE, ele pode lidar com o subsetting implícito devido a NAs.
+                if(length(na.omit(residuos_gwr)) > 2) { 
+                    teste_moran_residuos <- spdep::moran.test(residuos_gwr, 
+                                                              listw = vizinhos_listw, 
+                                                              zero.policy = TRUE, 
+                                                              na.action = na.omit, 
+                                                              alternative = "greater") 
+                    
+                    cat("\n--- Resultados do Teste I de Moran Global para Resíduos do GWR ---\n")
+                    cat(paste("I de Moran Observado:", round(teste_moran_residuos$estimate[1], 4), "\n"))
+                    cat(paste("I de Moran Esperado (sob H0 de não autocorrelação):", round(teste_moran_residuos$estimate[2], 4), "\n"))
+                    cat(paste("Desvio Padrão do I de Moran:", round(teste_moran_residuos$estimate[3], 4), "\n"))
+                    cat(paste("Estatística Z:", round(teste_moran_residuos$statistic, 2), "\n"))
+                    cat(paste("Valor-p:", format.pval(teste_moran_residuos$p.value, digits = 4, eps = 0.0001), "\n"))
+                    cat(paste("Hipótese Alternativa:", teste_moran_residuos$alternative, "(autocorrelação espacial positiva)\n"))
+
+                    cat("\nInterpretação do I de Moran para Resíduos:\n")
+                    if (teste_moran_residuos$p.value < 0.05) {
+                        cat("  O valor-p é menor que 0.05, sugerindo a rejeição da hipótese nula de ausência de autocorrelação espacial.\n")
+                        if (teste_moran_residuos$estimate[1] > teste_moran_residuos$estimate[2]) {
+                            cat("  Há evidência de AUTOCORRELAÇÃO ESPACIAL POSITIVA nos resíduos do GWR (valores de resíduos similares tendem a agrupar-se espacialmente).\n")
+                            cat("  Isso pode indicar que o modelo GWR não capturou completamente a estrutura espacial nos dados ou que há variáveis espaciais omitidas.\n")
+                        } else { # Embora testemos por 'greater', é bom ter a lógica caso mudemos para 'two.sided'
+                            cat("  Há evidência de AUTOCORRELAÇÃO ESPACIAL NEGATIVA nos resíduos do GWR (valores de resíduos dissimilares tendem a agrupar-se - menos comum).\n")
+                        }
+                    } else {
+                        cat("  O valor-p é maior ou igual a 0.05. Não há evidência estatística suficiente para rejeitar a hipótese nula de ausência de autocorrelação espacial nos resíduos.\n")
+                        cat("  Isso sugere que os resíduos do modelo GWR são espacialmente aleatórios, o que é um bom sinal para a adequação do modelo em termos de captura da estrutura espacial.\n")
+                    }
+                } else {
+                    cat("Não foi possível calcular o I de Moran: número insuficiente de resíduos válidos (após remover NAs) para o teste.\n")
+                }
+            }, error = function(e_moran) {
+                message(paste("Erro ao calcular o I de Moran para os resíduos:", e_moran$message))
+                cat("Não foi possível calcular o I de Moran para os resíduos.\n")
+            })
+        }
+    } else {
+        cat("Coluna 'residual' não encontrada em 'resultados_gwr_poligonos_sf' ou o objeto está vazio.\n")
+        cat("A análise de autocorrelação espacial dos resíduos não pode ser realizada.\n")
+    }
+    # --- FIM DA SEÇÃO 5 ---
+
+} # Fecha o else principal do Bloco 10
+
+cat("\n--- Fim do Bloco 10: Resumo GWR (com variáveis transformadas log1p e Análise de Resíduos) ---\n")
+# ```
+
+# (O script continua com o Bloco 11: Salvar Resultados)
+# ...
     
 ```
 
