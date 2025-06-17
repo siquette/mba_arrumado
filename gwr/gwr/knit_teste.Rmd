@@ -1,0 +1,406 @@
+---
+title: "gwr"
+author: "rodrigo"
+date: "2025-06-17"
+output: html_document
+---
+
+---
+title: "Análise de Regressão Geograficamente Ponderada (GWR)"
+author: "Rodrigo"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+# Chunk de configuração inicial.
+# É uma boa prática definir opções globais do knitr aqui.
+knitr::opts_chunk$set(
+  echo = TRUE,       # Mostra o código no output final
+  message = FALSE,     # Oculta mensagens de pacotes (ex: "library(dplyr)")
+  warning = FALSE,     # Oculta avisos
+  fig.width = 8,       # Largura padrão para figuras
+  fig.height = 7       # Altura padrão para figuras
+)
+# 1. Carregar bibliotecas necessárias
+# Usamos `suppressPackageStartupMessages` para um output mais limpo.
+suppressPackageStartupMessages({
+  library(sf)        # Para manipulação de dados espaciais vetoriais (Simple Features)
+  library(GWmodel)   # Para Geographically Weighted Regression (GWR)
+  library(dplyr)     # Para manipulação e transformação de dados
+  library(ggplot2)   # Para visualização e criação de mapas
+  library(sp)        # Dependência para o pacote GWmodel
+  library(spdep)     # Para testes de autocorrelação espacial (I de Moran)
+})
+
+# --- Definição dos caminhos dos arquivos ---
+# Usar caminhos absolutos funciona, mas para melhor portabilidade,
+# considere usar o pacote 'here' com projetos do RStudio no futuro.
+path_roubos <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/roubo.shp"
+path_drogas <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/drogas.shp"
+path_area_estudo <- "C:/Users/Rodrigo - H2R/OneDrive - Conhecimento e Ação em Marketing Ltda/Documentos/mba/mba_arrumado/nova abordagem/shp/centro_expandido/centro_expandido_dissolve.shp"
+
+# 2. Ler os arquivos shapefile
+# O bloco tryCatch garante que o script pare com uma mensagem clara se um arquivo não for encontrado.
+tryCatch({
+  pontos_roubo <- st_read(path_roubos, quiet = TRUE)
+  pontos_drogas <- st_read(path_drogas, quiet = TRUE)
+  area_estudo <- st_read(path_area_estudo, quiet = TRUE)
+}, error = function(e) {
+  stop("Erro crítico ao ler um ou mais arquivos shapefile. Verifique os caminhos e a integridade dos arquivos: ", e$message)
+})
+
+# 3. Definir CRS projetado e transformar camadas
+# É fundamental usar um CRS projetado (em metros) para análises de distância como GWR.
+# SIRGAS 2000 / UTM zone 23S (EPSG:31983) é apropriado para a região de São Paulo.
+crs_projetado_desejado <- st_crs(31983)
+
+# Função auxiliar para transformar o CRS apenas se necessário
+transformar_crs_se_necessario <- function(sf_object, target_crs_obj, nome_camada) {
+  if (st_crs(sf_object) != target_crs_obj) {
+    return(st_transform(sf_object, crs = target_crs_obj))
+  }
+  return(sf_object)
+}
+
+tryCatch({
+  area_estudo <- transformar_crs_se_necessario(area_estudo, crs_projetado_desejado, "area_estudo")
+  pontos_roubo <- transformar_crs_se_necessario(pontos_roubo, crs_projetado_desejado, "pontos_roubo")
+  pontos_drogas <- transformar_crs_se_necessario(pontos_drogas, crs_projetado_desejado, "pontos_drogas")
+}, error = function(e) {
+  stop("Erro durante a transformação de CRS: ", e$message)
+})
+
+# Verificação final para garantir que a transformação de CRS funcionou
+if (st_is_longlat(area_estudo)) {
+    stop("O CRS da área de estudo ainda é geográfico (latitude/longitude). A análise requer um CRS projetado (em metros).")
+}
+
+message("Seção 1: Pacotes, dados e CRS configurados com sucesso.")
+
+```
+
+```{r cria-grade-e-agrega-dados}
+# 4. Criar uma grade hexagonal de análise
+# O tamanho da célula (cell_size_m) é um parâmetro importante que pode ser ajustado.
+# Valores maiores criam menos células, suavizando mais os dados.
+cell_size_m <- 800 # Tamanho da célula em metros (distância entre centros)
+
+# st_union garante que a área de estudo seja uma única geometria
+area_estudo_union <- st_union(area_estudo)
+
+# st_make_grid cria a grade e st_intersection a recorta para a área de estudo
+grade_base <- st_make_grid(area_estudo_union, cellsize = cell_size_m, what = "polygons", square = FALSE)
+grade_sf <- st_sf(geometry = grade_base)
+grade_area_estudo <- st_intersection(grade_sf, area_estudo_union)
+
+# Limpa geometrias inválidas ou vazias e cria um ID único para cada célula
+grade_area_estudo <- grade_area_estudo[!st_is_empty(grade_area_estudo), ]
+grade_area_estudo$id_celula_grade <- 1:nrow(grade_area_estudo)
+grade_area_estudo <- grade_area_estudo %>% dplyr::select(id_celula_grade, geometry)
+
+# 5. Agregar os pontos à grade
+# st_join para associar pontos a polígonos e dplyr para contar
+contagem_roubos <- st_join(pontos_roubo, grade_area_estudo, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(id_celula_grade)) %>%
+  count(id_celula_grade, name = "n_roubos")
+
+contagem_drogas <- st_join(pontos_drogas, grade_area_estudo, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(id_celula_grade)) %>%
+  count(id_celula_grade, name = "n_drogas")
+
+# Combina as contagens com a grade espacial, mantendo todas as células
+dados_gwr_sf <- grade_area_estudo %>%
+  left_join(contagem_roubos, by = "id_celula_grade") %>%
+  left_join(contagem_drogas, by = "id_celula_grade") %>%
+  # Substitui NA por 0, pois NA significa que nenhum ponto foi contado naquela célula
+  mutate(
+    n_roubos = ifelse(is.na(n_roubos), 0, n_roubos),
+    n_drogas = ifelse(is.na(n_drogas), 0, n_drogas)
+  )
+
+# 6. Aplicar transformação log1p
+# log1p(x) é igual a log(1 + x). Isso ajuda a lidar com o grande número de zeros
+# e a reduzir a assimetria dos dados de contagem.
+dados_gwr_sf <- dados_gwr_sf %>%
+  mutate(
+    log1p_n_roubos = log1p(n_roubos),
+    log1p_n_drogas = log1p(n_drogas)
+  )
+
+message("Seção 2: Grade hexagonal criada e dados agregados e transformados com sucesso.")
+
+```
+
+
+```{r prepara-dados-gwr-e-inspeciona}
+# 7. Preparar dados para o formato GWR (SPDF)
+# O pacote GWmodel requer um objeto SpatialPointsDataFrame (SPDF).
+# Usamos st_point_on_surface para garantir que o ponto representativo esteja dentro do polígono.
+locais_regressao_sf_centroids <- st_point_on_surface(dados_gwr_sf)
+
+# Extrai as coordenadas e os atributos (incluindo as colunas originais e transformadas)
+coords_locais_regressao <- st_coordinates(locais_regressao_sf_centroids)
+dados_atributos_para_spdf <- st_drop_geometry(dados_gwr_sf)
+
+# Cria o objeto SPDF, mantendo o CRS correto.
+dados_spdf_gwr <- SpatialPointsDataFrame(
+  coords = coords_locais_regressao,
+  data = dados_atributos_para_spdf,
+  proj4string = CRS(st_crs(dados_gwr_sf)$proj4string)
+)
+
+# 8. Inspeção da Esparsidade dos Dados
+# É importante verificar quantos zeros existem, pois isso afeta o modelo.
+cat("--- Inspeção da Esparsidade dos Dados ---\n")
+
+porcentagem_zeros_roubos <- round(sum(dados_spdf_gwr$n_roubos == 0) / nrow(dados_spdf_gwr) * 100, 1)
+cat(paste0("Porcentagem de células SEM roubos: ", porcentagem_zeros_roubos, "%\n"))
+
+porcentagem_zeros_drogas <- round(sum(dados_spdf_gwr$n_drogas == 0) / nrow(dados_spdf_gwr) * 100, 1)
+cat(paste0("Porcentagem de células SEM tráfico de drogas: ", porcentagem_zeros_drogas, "%\n\n"))
+
+# Verifica se o número de observações é suficiente para a análise.
+if (length(dados_spdf_gwr) < 50) {
+  warning("O número de células para a análise GWR é baixo (< 50). Considere aumentar 'cell_size_m'.")
+}
+
+message("Seção 3: Dados convertidos para SPDF e esparsidade inspecionada com sucesso.")
+
+```
+
+
+```{r executa-gwr}
+# 9. Definir a fórmula do modelo GWR
+# Esta linha é a correção crucial. Ela define a relação que queremos modelar.
+formula_gwr <- log1p_n_roubos ~ log1p_n_drogas
+
+message(paste("Fórmula GWR definida como:", deparse(formula_gwr)))
+
+# 10. Calcular a largura de banda (bandwidth) ótima e a matriz de distância
+# A matriz de distância é pré-calculada para otimizar a performance.
+dMat_calibracao <- GWmodel::gw.dist(dp.locat = coordinates(dados_spdf_gwr))
+
+# O script tenta encontrar a largura de banda adaptativa (nº de vizinhos)
+# usando o critério AIC. Ele tenta diferentes funções `kernel` para garantir
+# que um resultado seja encontrado.
+bw_adaptativa <- NULL
+kernel_usado <- "gaussian" # Padrão inicial
+
+tryCatch({
+    bw_adaptativa <- GWmodel::bw.gwr(
+      formula = formula_gwr,
+      data = dados_spdf_gwr,
+      dMat = dMat_calibracao,
+      approach = "AIC",
+      kernel = "gaussian",
+      adaptive = TRUE
+    )
+  }, error = function(e){
+    message("bw.gwr com kernel 'gaussian' falhou. Tentando 'bisquare'.")
+    tryCatch({
+      bw_adaptativa <- GWmodel::bw.gwr(
+        formula = formula_gwr,
+        data = dados_spdf_gwr,
+        dMat = dMat_calibracao,
+        approach = "AIC",
+        kernel = "bisquare",
+        adaptive = TRUE
+      )
+      kernel_usado <<- "bisquare"
+    }, error = function(e2){
+      stop("Falha crítica ao calcular a largura de banda com múltiplos kernels. Erro: ", e2$message)
+    })
+})
+
+# Verificação final da largura de banda
+if (is.null(bw_adaptativa) || !is.numeric(bw_adaptativa) || bw_adaptativa <= 0) {
+  stop("Não foi possível calcular uma largura de banda válida. Verifique a esparsidade dos dados ou a fórmula.")
+} else {
+  bw_adaptativa <- round(bw_adaptativa) # Arredonda para o número inteiro de vizinhos
+  message(paste("Largura de banda adaptativa ótima calculada:", bw_adaptativa, "vizinhos com kernel '", kernel_usado, "'."))
+}
+
+# 11. Executar a Regressão Geograficamente Ponderada (GWR)
+# Com todos os componentes prontos, executamos o modelo principal.
+gwr_resultado_lista <- NULL
+
+tryCatch({
+  gwr_resultado_lista <- GWmodel::gwr.basic(
+    formula = formula_gwr,
+    data = dados_spdf_gwr,
+    bw = bw_adaptativa,
+    kernel = kernel_usado,
+    adaptive = TRUE,
+    dMat = dMat_calibracao
+  )
+}, error = function(e) {
+  stop("Erro crítico ao executar o modelo GWR com gwr.basic: ", e$message)
+})
+
+# O SDF (SpatialDataFrame) dentro da lista de resultados contém os coeficientes locais.
+gwr_resultados_sdf <- gwr_resultado_lista$SDF
+
+if (is.null(gwr_resultados_sdf)) {
+  stop("Execução do GWR não produziu um SDF com resultados. A análise falhou.")
+}
+
+message("Seção 4: Modelo GWR executado com sucesso.")
+
+```
+
+```{r visualiza-resultados-gwr}
+# 12. Combinar resultados GWR de volta aos polígonos originais
+# Verificamos se o número de linhas corresponde para garantir um join seguro.
+if (nrow(dados_gwr_sf) != nrow(gwr_resultados_sdf)) {
+  stop("Número de linhas nos resultados GWR não corresponde aos polígonos originais. A junção falhou.")
+}
+
+# Extrai os resultados do GWR para um data.frame simples
+gwr_resultados_df <- as.data.frame(gwr_resultados_sdf)
+gwr_resultados_df$id_celula_grade <- dados_gwr_sf$id_celula_grade # Adiciona o ID para um join robusto
+
+# Renomeia a coluna do coeficiente para clareza e para evitar conflitos de nome
+var_independente_nome <- all.vars(formula_gwr)[2] # Pega o nome da variável ("log1p_n_drogas")
+novo_nome_coef <- paste0("coef_", var_independente_nome)
+names(gwr_resultados_df)[names(gwr_resultados_df) == var_independente_nome] <- novo_nome_coef
+
+# Junta os resultados de volta ao sf original usando o ID da célula
+resultados_gwr_poligonos_sf <- dplyr::left_join(
+  dados_gwr_sf,
+  gwr_resultados_df,
+  by = "id_celula_grade"
+)
+
+message("Seção 5: Resultados GWR combinados aos polígonos. Preparando mapas...")
+
+# 13. Criar os mapas de resultados
+# --- Mapa 1: Coeficientes Locais ---
+nome_amigavel_var <- "log1p(n_drogas)" # Para usar nos títulos
+mapa_coeficientes <- ggplot(data = resultados_gwr_poligonos_sf) +
+  geom_sf(aes(fill = .data[[novo_nome_coef]]), color = "grey50", linewidth = 0.1) +
+  geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
+  scale_fill_viridis_c(name = "Coeficiente Local") +
+  labs(
+    title = paste("GWR: Coeficientes Locais para", nome_amigavel_var),
+    subtitle = paste("Relação entre roubos e tráfico de drogas na área de estudo"),
+    caption = paste("Largura de banda:", bw_adaptativa, "vizinhos | Kernel:", kernel_usado)
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(mapa_coeficientes)
+
+# --- Mapa 2: R² Local ---
+mapa_r2_local <- ggplot(data = resultados_gwr_poligonos_sf) +
+  geom_sf(aes(fill = Local_R2), color = "grey50", linewidth = 0.1) +
+  geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
+  scale_fill_viridis_c(name = "R² Local", option = "plasma", labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "GWR: R² Local (Poder Explicativo do Modelo)",
+    subtitle = "Mostra onde o modelo se ajusta melhor ou pior aos dados",
+    caption = paste("Valores de R² Local < 0 indicam ajuste local pior que a média")
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(mapa_r2_local)
+
+# --- Mapa 3: Valores-t Locais ---
+t_val_col_name <- paste0(var_independente_nome, "_TV")
+mapa_t_valores <- ggplot(data = resultados_gwr_poligonos_sf) +
+  geom_sf(aes(fill = .data[[t_val_col_name]]), color = "grey50", linewidth = 0.1) +
+  geom_sf(data = area_estudo_union, fill = NA, color = "black", linewidth = 0.7) +
+  scale_fill_gradient2(
+    name = "Valor-t",
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0
+  ) +
+  labs(
+    title = paste("GWR: Significância do Coeficiente de", nome_amigavel_var),
+    subtitle = "Mostra onde a relação é estatisticamente significativa (|t| > ~1.96)",
+    caption = "Valores em vermelho (positivos) e azul (negativos) indicam significância."
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(mapa_t_valores)
+
+```
+
+```{r resumo-e-salvamento}
+
+if (!exists("gwr_resultado_lista") || !exists("resultados_gwr_poligonos_sf")) {
+    cat("AVISO: Objetos de resultado não encontrados. O resumo não pode ser gerado.\n")
+} else {
+    # Seção 1: Parâmetros do Modelo GWR Utilizado
+    cat("\n## 1. Parâmetros do Modelo GWR Utilizado ##\n")
+    cat("--------------------------------------------\n")
+    cat(paste("Fórmula do Modelo:", deparse(formula_gwr), "\n"))
+    cat(paste("Largura de Banda (Adaptativa):", bw_adaptativa, "vizinhos\n"))
+    cat(paste("Função Kernel:", kernel_usado_para_bw, "\n"))
+    cat(paste("Número de Pontos de Calibração:", length(dados_spdf_gwr), "\n"))
+
+    # Seção 2: Diagnósticos Globais do Modelo GWR
+    cat("\n## 2. Diagnósticos Globais do Modelo GWR ##\n")
+    cat("----------------------------------------------------------------------------------\n")
+    if (!is.null(gwr_resultado_lista$GW.diagnostic)) {
+        diagnostics <- gwr_resultado_lista$GW.diagnostic
+        cat(paste("AICc (Akaike Information Criterion Corrigido):", round(diagnostics$AICc, 2), "\n"))
+        cat(paste("R² do GWR (Global):", round(diagnostics$gw.R2, 4), "\n"))
+        cat(paste("R² Ajustado do GWR (Global):", round(diagnostics$gwR2.adj, 4), "\n"))
+    }
+
+    # Seção 3: Análise dos Coeficientes Locais e Significância
+    cat("\n## 3. Análise dos Coeficientes Locais e Significância ##\n")
+    cat("--------------------------------------------------------------------------\n")
+    
+    print_summary_stats <- function(data_vector, name) {
+        cat(paste("\nResumo Estatístico para '", name, "':\n", sep=""))
+        print(summary(data_vector))
+    }
+
+    print_summary_stats(resultados_gwr_poligonos_sf$Intercept, "Intercepto Local")
+    
+    vi_nome <- all.vars(formula_gwr)[2]
+    coef_vi_col_nome <- paste0("coef_", vi_nome)
+    tval_vi_col_nome <- paste0(vi_nome, "_TV")
+
+    print_summary_stats(resultados_gwr_poligonos_sf[[coef_vi_col_nome]], paste("Coeficiente Local de", vi_nome))
+    print_summary_stats(resultados_gwr_poligonos_sf[[tval_vi_col_nome]], paste("Valor-t Local de", vi_nome))
+
+    # Seção 4: Inferência e Conclusões Preliminares
+    cat("\n## 4. Inferência e Conclusões Preliminares ##\n")
+    cat("------------------------------------------------------------------------------------\n")
+    cat("A. Não Estacionariedade: A variação nos coeficientes locais sugere que a relação entre as variáveis não é constante no espaço.\n")
+    cat("B. Natureza da Relação: O mapa de coeficientes visualiza onde a relação é positiva ou negativa, e o mapa de valores-t onde é significativa.\n")
+    cat("C. Interpretação de log-log: Um coeficiente de 0.5 significa que um aumento de 1% em (1+drogas) está associado a um aumento de ~0.5% em (1+roubos), localmente.\n")
+
+    # Seção 5: Análise de Autocorrelação Espacial dos Resíduos
+    cat("\n## 5. Análise de Autocorrelação Espacial dos Resíduos (I de Moran Global) ##\n")
+    cat("--------------------------------------------------------------------------------\n")
+    vizinhos <- spdep::poly2nb(resultados_gwr_poligonos_sf, queen = TRUE)
+    pesos_vizinhos <- spdep::nb2listw(vizinhos, style = "W", zero.policy = TRUE)
+    teste_moran_residuos <- spdep::moran.test(
+      resultados_gwr_poligonos_sf$residual,
+      listw = pesos_vizinhos, zero.policy = TRUE, na.action = na.omit
+    )
+    cat(paste("I de Moran para Resíduos:", round(teste_moran_residuos$estimate[1], 4), "\n"))
+    cat(paste("Valor-p:", format.pval(teste_moran_residuos$p.value, digits = 4), "\n"))
+    if(teste_moran_residuos$p.value < 0.05) {
+      cat("Interpretação: Há evidência de autocorrelação espacial nos resíduos, sugerindo que o modelo pode não ter capturado toda a estrutura espacial.\n")
+    } else {
+      cat("Interpretação: Não há evidência de autocorrelação espacial nos resíduos, o que é um bom sinal.\n")
+    }
+}
+
+```
+
+
